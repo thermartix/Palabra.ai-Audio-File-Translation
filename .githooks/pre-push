@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "gitleaks is required for secret scanning. Install it before pushing." >&2
+  exit 1
+fi
+
+zero_sha="0000000000000000000000000000000000000000"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [ "$local_sha" = "$zero_sha" ]; then
+    continue
+  fi
+
+  if [ "$remote_sha" = "$zero_sha" ]; then
+    log_opts="$local_sha --not --remotes"
+  elif git merge-base --is-ancestor "$remote_sha" "$local_sha"; then
+    log_opts="$remote_sha..$local_sha"
+  else
+    log_opts="$local_sha --not --remotes"
+  fi
+
+  echo "Running gitleaks on $local_ref -> $remote_ref"
+  gitleaks git --log-opts "$log_opts" --redact --no-banner .
+done

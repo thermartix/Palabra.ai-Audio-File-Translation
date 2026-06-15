@@ -1,0 +1,22 @@
+# Normalize text files consistently in Git while keeping working-tree handling simple.
+* text=auto
+
+# Source and config files should stay as text with LF line endings.
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.gitignore text eol=lf
+*.gitattributes text eol=lf
+*.env.example text eol=lf
+
+# Hook scripts are shell scripts and should keep LF line endings.
+.githooks/* text eol=lf
+
+# Media and generated audio artifacts are binary.
+*.mp4 binary
+*.wav binary
+*.pyc binary

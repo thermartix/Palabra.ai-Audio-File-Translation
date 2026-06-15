@@ -1,0 +1,25 @@
+client_id = "" # Leave empty here; loaded from PALABRA_CLIENT_ID in .env.
+client_secret = "" # Leave empty here; loaded from PALABRA_CLIENT_SECRET in .env.
+source_language = "en" # Language spoken in the source video.
+target_language = "de" # Language to synthesize in the translated output.
+speech_mode = "voice_id" # "voice_id" for a fixed voice, or "voice_cloning" to mimic the speaker.
+voice_id = "YOUR_VOICE_ID" # Target voice to use when speech_mode = "voice_id".
+ffmpeg_path = "ffmpeg" # ffmpeg executable name or full path.
+alignment_mode = "ffmpeg_segments" # "raw", "inline", or "ffmpeg_segments".
+audio_chunk_ms = 320 # Source audio chunk size sent to Palabra over WebSocket.
+output_inactivity_timeout_sec = 8.0 # Stop waiting after this many seconds without returned audio.
+auto_tempo = false # Let Palabra auto-speed the spoken output to manage queue delay.
+min_tempo = 1.0 # Minimum Palabra TTS tempo multiplier.
+max_tempo = 1.0 # Maximum Palabra TTS tempo multiplier.
+desired_queue_level_ms = 5000 # Desired translated-speech queue size inside Palabra.
+max_queue_level_ms = 20000 # Maximum queue size before Palabra drops older queued audio.
+segment_confirmation_silence_threshold = 0.7 # Silence needed before Palabra confirms a phrase boundary.
+sentence_splitter_enabled = true # Allow Palabra to split long sentences into smaller chunks.
+pad_segments_to_source_timing = true # Add silence after short translated sections to keep timing closer.
+normalize_source_timestamps = true # Compensate for Palabra phrase events arriving later than the original speech.
+segment_alignment_strategy = "pad_or_speedup" # "pad_only" or "pad_or_speedup" for offline ffmpeg alignment.
+segment_max_speedup = 1.15 # Max tempo increase allowed for too-long segments in ffmpeg alignment.
+segment_speedup_threshold_sec = 0.15 # Only speed up a segment if it overruns by at least this much.
+pad_output_to_input_duration = true # Pad the finished WAV with silence if it ends too early.
+trim_output_to_input_duration = false # Trim the finished WAV if it runs longer than the source audio.
+write_alignment_debug_json = true # Write a .segments.json file with timing/debug details.

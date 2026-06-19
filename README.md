@@ -100,21 +100,41 @@ With `segment_alignment_strategy = "pad_or_speedup"`, the offline `ffmpeg_segmen
 
 ## Usage
 
+Default MP3 audio output:
+
 ```bash
-python palabra_dub.py input_file.mp4 output_audio.wav
+python palabra_dub.py input_file.mp4
 ```
 
-Optional video remux:
+Explicit audio output:
 
 ```bash
-python palabra_dub.py input_file.mp4 output_audio.wav output_video.mp4
+python palabra_dub.py input_file.mp4 --audio mp3
+python palabra_dub.py input_file.mp4 --audio wav
+python palabra_dub.py input_file.mp4 custom_output.mp3
+python palabra_dub.py input_file.mp4 custom_output.wav
+```
+
+Video output only:
+
+```bash
+python palabra_dub.py input_file.mp4 --video
+python palabra_dub.py input_file.mp4 custom_output.mp4
+```
+
+Audio and video output together:
+
+```bash
+python palabra_dub.py input_file.mp4 --audio wav --video
 ```
 
 Optional override:
 
 ```bash
-python palabra_dub.py input_file.mp4 output_audio.wav --voice-id YOUR_OTHER_VOICE_ID
+python palabra_dub.py input_file.mp4 --audio --voice-id YOUR_OTHER_VOICE_ID
 ```
+
+Without an explicit output path, outputs are saved next to the input as `input_file_dubbed_DE.mp3`, `input_file_dubbed_DE.wav`, and/or `input_file_dubbed_DE.mp4`, using the configured `target_language` code. With an explicit `output.xxx`, the extension selects audio or video output and the provided path is used as-is.
 
 ## Repo Safety
 
@@ -127,9 +147,9 @@ python palabra_dub.py input_file.mp4 output_audio.wav --voice-id YOUR_OTHER_VOIC
 - The script extracts audio as `pcm_s16le`, `16 kHz`, mono, which matches the Palabra WebSocket input configuration used here.
 - Palabra returns translated audio chunks. This script rebuilds them into a WAV file at `24 kHz` mono PCM, matching the documented default output.
 - By default, the script disables Palabra auto-tempo and pads trailing silence if the translated audio is shorter than the input.
-- The script always saves a clean `*.raw.wav` version of Palabra's continuous output before any optional alignment pass.
+- The script creates temporary `*.raw.wav`, extracted input WAV, and segment working files during processing, then deletes them when the run finishes.
 - The default `ffmpeg_segments` mode is safer than inline rewriting because it leaves the raw translated stream untouched and does the timing work afterward.
-- If you pass a third positional argument, the script will mux the translated audio back into the video automatically with `ffmpeg`.
+- If you pass `--video`, the script muxes the translated audio back into the video automatically with `ffmpeg`.
 
 ## Example mux command
 

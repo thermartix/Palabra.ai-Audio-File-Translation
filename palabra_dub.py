@@ -24,6 +24,8 @@ INPUT_SAMPLE_WIDTH_BYTES = 2
 OUTPUT_SAMPLE_RATE = 24000
 OUTPUT_CHANNELS = 1
 OUTPUT_SAMPLE_WIDTH_BYTES = 2
+AUDIO_OUTPUT_EXTENSIONS = {".mp3", ".wav"}
+VIDEO_OUTPUT_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
 ANIMATION_WIDTH = 80
 _ANIMATION_ACTIVE = False
 
@@ -111,8 +113,31 @@ def apply_env_overrides(config: dict) -> dict:
     return merged
 
 
+def ffmpeg_command(ffmpeg_path: str, *args: str) -> list[str]:
+    return [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostats",
+        *args,
+    ]
+
+
+def run_command(command: list[str]) -> None:
+    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    if completed.returncode == 0:
+        return
+
+    if completed.stdout:
+        print(completed.stdout, file=sys.stderr, end="")
+    if completed.stderr:
+        print(completed.stderr, file=sys.stderr, end="")
+    raise subprocess.CalledProcessError(completed.returncode, command)
+
+
 def extract_audio_to_wav(input_video: Path, output_wav: Path, ffmpeg_path: str) -> None:
-    command = [
+    command = ffmpeg_command(
         ffmpeg_path,
         "-y",
         "-i",
@@ -125,12 +150,12 @@ def extract_audio_to_wav(input_video: Path, output_wav: Path, ffmpeg_path: str) 
         "-ac",
         str(INPUT_CHANNELS),
         str(output_wav),
-    ]
-    subprocess.run(command, check=True)
+    )
+    run_command(command)
 
 
 def mux_audio_back_to_video(input_video: Path, input_audio: Path, output_video: Path, ffmpeg_path: str) -> None:
-    command = [
+    command = ffmpeg_command(
         ffmpeg_path,
         "-y",
         "-i",
@@ -147,12 +172,27 @@ def mux_audio_back_to_video(input_video: Path, input_audio: Path, output_video: 
         "aac",
         "-shortest",
         str(output_video),
-    ]
-    subprocess.run(command, check=True)
+    )
+    run_command(command)
+
+
+def convert_wav_to_mp3(input_wav: Path, output_mp3: Path, ffmpeg_path: str) -> None:
+    command = ffmpeg_command(
+        ffmpeg_path,
+        "-y",
+        "-i",
+        str(input_wav),
+        "-codec:a",
+        "libmp3lame",
+        "-q:a",
+        "2",
+        str(output_mp3),
+    )
+    run_command(command)
 
 
 def run_ffmpeg(command: list[str]) -> None:
-    subprocess.run(command, check=True)
+    run_command(command)
 
 
 def log(message: str) -> None:
@@ -601,6 +641,45 @@ def fit_output_wav_file_to_input(config: dict, input_wav: Path, output_wav: Path
     write_output_wav(output_wav, pcm)
 
 
+def cleanup_path(path: Path) -> None:
+    if not path.exists():
+        return
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def output_language_suffix(target_language: str) -> str:
+    cleaned = "".join(char if char.isalnum() else "_" for char in target_language.strip())
+    return cleaned.upper() or "OUTPUT"
+
+
+def output_stem(input_video: Path, target_language: str) -> str:
+    return f"{input_video.stem}_dubbed_{output_language_suffix(target_language)}"
+
+
+def default_audio_output_path(input_video: Path, audio_format: str, target_language: str) -> Path:
+    return input_video.with_name(f"{output_stem(input_video, target_language)}.{audio_format}")
+
+
+def default_video_output_path(input_video: Path, target_language: str) -> Path:
+    suffix = input_video.suffix or ".mp4"
+    return input_video.with_name(f"{output_stem(input_video, target_language)}{suffix}")
+
+
+def classify_output_path(output_path: Path) -> tuple[str, str | None]:
+    suffix = output_path.suffix.lower()
+    if suffix == ".mp3":
+        return "audio", "mp3"
+    if suffix == ".wav":
+        return "audio", "wav"
+    if suffix in VIDEO_OUTPUT_EXTENSIONS:
+        return "video", None
+    supported = ", ".join(sorted(AUDIO_OUTPUT_EXTENSIONS | VIDEO_OUTPUT_EXTENSIONS))
+    raise ValueError(f"Unsupported output extension '{output_path.suffix}'. Use one of: {supported}")
+
+
 def build_ffmpeg_segment_output(
     config: dict,
     input_wav: Path,
@@ -653,7 +732,7 @@ def build_ffmpeg_segment_output(
                 if required_speedup <= max_speedup:
                     sped_path = work_dir / f"segment_{index:04d}.sped.wav"
                     run_ffmpeg(
-                        [
+                        ffmpeg_command(
                             config.get("ffmpeg_path", "ffmpeg"),
                             "-y",
                             "-i",
@@ -661,7 +740,7 @@ def build_ffmpeg_segment_output(
                             "-filter:a",
                             build_atempo_filter(required_speedup),
                             str(sped_path),
-                        ]
+                        )
                     )
                     final_segment_path = sped_path
                     processed_duration_sec = get_wav_duration_seconds(sped_path)
@@ -698,25 +777,11 @@ def build_ffmpeg_segment_output(
         concat_entries.append(tail_path)
         log("Kept trailing translated audio that had no completed phrase metadata.")
 
-    concat_list_path = work_dir / "concat.txt"
-    concat_lines = [f"file '{path.resolve().as_posix()}'" for path in concat_entries]
-    concat_list_path.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
+    combined_pcm = bytearray()
+    for path in concat_entries:
+        combined_pcm.extend(load_wav_pcm(path))
+    write_output_wav(output_wav, combined_pcm)
 
-    run_ffmpeg(
-        [
-            config.get("ffmpeg_path", "ffmpeg"),
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(concat_list_path),
-            "-c",
-            "copy",
-            str(output_wav),
-        ]
-    )
     fit_output_wav_file_to_input(config, input_wav, output_wav)
     log(
         f"FFmpeg segment alignment inserted {total_padding_sec:.2f} seconds of silence, "
@@ -727,86 +792,120 @@ def build_ffmpeg_segment_output(
 
 async def run_pipeline(config: dict) -> None:
     input_video = Path(config["input_video"]).resolve()
-    output_wav = Path(config["output_wav"]).resolve()
+    audio_format = config.get("audio_format")
+    output_wav = Path(config["working_wav"]).resolve()
+    output_audio = Path(config["output_audio"]).resolve() if config.get("output_audio") else None
     output_video = Path(config["output_video"]).resolve() if config.get("output_video") else None
     temp_input_wav = output_wav.with_name(f"{output_wav.stem}.input_16k_mono.wav")
     raw_output_wav = output_wav.with_name(f"{output_wav.stem}.raw.wav")
+    segment_work_dir = output_wav.parent / f"{output_wav.stem}_ffmpeg_segments"
 
     if not input_video.exists():
         raise FileNotFoundError(f"Input video not found: {input_video}")
 
-    log(f"Extracting audio from: {input_video.name}")
-    extract_audio_to_wav(input_video, temp_input_wav, config.get("ffmpeg_path", "ffmpeg"))
-    log("Creating Palabra streaming session...")
-    session = create_session(config["client_id"], config["client_secret"])
-
-    ws_url = session["ws_url"]
-    publisher = session["publisher"]
-    delimiter = "&" if "?" in ws_url else "?"
-    endpoint = f"{ws_url}{delimiter}token={urllib.parse.quote(publisher)}"
-
-    receive_state = ReceiveState(stream_start_monotonic=time.monotonic())
-    heartbeat_stop = asyncio.Event()
-    heartbeat_task = asyncio.create_task(animate_progress("Palabra pipeline running", heartbeat_stop))
-    log("Connecting to Palabra WebSocket...")
     try:
-        async with websockets.connect(endpoint, max_size=None) as ws:
-            log("Connected. Sending translation task configuration...")
-            await ws.send(json.dumps(build_set_task(config)))
-            sender = asyncio.create_task(send_audio(ws, temp_input_wav, int(config.get("audio_chunk_ms", 320))))
-            receiver = asyncio.create_task(
-                receive_audio(ws, receive_state, float(config.get("output_inactivity_timeout_sec", 8.0)))
-            )
+        log(f"Extracting audio from: {input_video.name}")
+        extract_audio_to_wav(input_video, temp_input_wav, config.get("ffmpeg_path", "ffmpeg"))
+        log("Creating Palabra streaming session...")
+        session = create_session(config["client_id"], config["client_secret"])
 
-            await sender
-            await receiver
+        ws_url = session["ws_url"]
+        publisher = session["publisher"]
+        delimiter = "&" if "?" in ws_url else "?"
+        endpoint = f"{ws_url}{delimiter}token={urllib.parse.quote(publisher)}"
 
-            try:
-                await ws.send(json.dumps({"message_type": "end_task", "data": {}}))
-            except Exception:
-                pass
-    finally:
-        heartbeat_stop.set()
-        await heartbeat_task
+        receive_state = ReceiveState(stream_start_monotonic=time.monotonic())
+        heartbeat_stop = asyncio.Event()
+        heartbeat_task = asyncio.create_task(animate_progress("Palabra pipeline running", heartbeat_stop))
 
-    raw_pcm = bytearray(receive_state.continuous_output_pcm)
-    log(f"Writing raw translated WAV: {raw_output_wav.name}")
-    write_output_wav(raw_output_wav, raw_pcm)
+        log("Connecting to Palabra WebSocket...")
+        try:
+            async with websockets.connect(endpoint, max_size=None) as ws:
+                log("Connected. Sending translation task configuration...")
+                await ws.send(json.dumps(build_set_task(config)))
+                sender = asyncio.create_task(send_audio(ws, temp_input_wav, int(config.get("audio_chunk_ms", 320))))
+                receiver = asyncio.create_task(
+                    receive_audio(ws, receive_state, float(config.get("output_inactivity_timeout_sec", 8.0)))
+                )
 
-    manifest, latency_offset_sec = build_segment_manifest(config, receive_state)
-    alignment_mode = normalize_alignment_mode(config)
+                await sender
+                await receiver
 
-    if alignment_mode == "raw":
-        output_pcm = bytearray(raw_pcm)
-        used_manifest = manifest
-    elif alignment_mode == "inline":
-        output_pcm, used_manifest = build_inline_aligned_output(config, receive_state, manifest)
-    else:
-        used_manifest = build_ffmpeg_segment_output(config, temp_input_wav, output_wav, raw_output_wav, raw_pcm, manifest)
+                try:
+                    await ws.send(json.dumps({"message_type": "end_task", "data": {}}))
+                except Exception:
+                    pass
+        finally:
+            heartbeat_stop.set()
+            await heartbeat_task
+
+        raw_pcm = bytearray(receive_state.continuous_output_pcm)
+        log(f"Writing raw translated WAV: {raw_output_wav.name}")
+        write_output_wav(raw_output_wav, raw_pcm)
+
+        manifest, latency_offset_sec = build_segment_manifest(config, receive_state)
+        alignment_mode = normalize_alignment_mode(config)
+
+        if alignment_mode == "raw":
+            output_pcm = bytearray(raw_pcm)
+            used_manifest = manifest
+        elif alignment_mode == "inline":
+            output_pcm, used_manifest = build_inline_aligned_output(config, receive_state, manifest)
+        else:
+            used_manifest = build_ffmpeg_segment_output(config, temp_input_wav, output_wav, raw_output_wav, raw_pcm, manifest)
+            if bool(config.get("write_alignment_debug_json", True)):
+                write_alignment_manifest(output_wav, used_manifest, latency_offset_sec)
+            if output_video:
+                log(f"Muxing translated audio into video: {output_video.name}")
+                mux_audio_back_to_video(input_video, output_wav, output_video, config.get("ffmpeg_path", "ffmpeg"))
+            if output_audio and audio_format == "mp3":
+                log(f"Writing translated MP3: {output_audio.name}")
+                convert_wav_to_mp3(output_wav, output_audio, config.get("ffmpeg_path", "ffmpeg"))
+            return
+
+        fit_output_duration_to_input(config, temp_input_wav, output_pcm)
+        log(f"Writing translated WAV: {output_wav.name}")
+        write_output_wav(output_wav, output_pcm)
         if bool(config.get("write_alignment_debug_json", True)):
             write_alignment_manifest(output_wav, used_manifest, latency_offset_sec)
         if output_video:
             log(f"Muxing translated audio into video: {output_video.name}")
             mux_audio_back_to_video(input_video, output_wav, output_video, config.get("ffmpeg_path", "ffmpeg"))
-        return
-
-    fit_output_duration_to_input(config, temp_input_wav, output_pcm)
-    log(f"Writing translated WAV: {output_wav.name}")
-    write_output_wav(output_wav, output_pcm)
-    if bool(config.get("write_alignment_debug_json", True)):
-        write_alignment_manifest(output_wav, used_manifest, latency_offset_sec)
-    if output_video:
-        log(f"Muxing translated audio into video: {output_video.name}")
-        mux_audio_back_to_video(input_video, output_wav, output_video, config.get("ffmpeg_path", "ffmpeg"))
+        if output_audio and audio_format == "mp3":
+            log(f"Writing translated MP3: {output_audio.name}")
+            convert_wav_to_mp3(output_wav, output_audio, config.get("ffmpeg_path", "ffmpeg"))
+    finally:
+        cleanup_candidates = [temp_input_wav, raw_output_wav, segment_work_dir]
+        if audio_format != "wav":
+            cleanup_candidates.extend([output_wav, output_wav.with_suffix(".segments.json")])
+        for path in cleanup_candidates:
+            try:
+                cleanup_path(path)
+            except OSError as exc:
+                log(f"Could not delete temporary file {path}: {exc}")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate translated speech audio from a video via Palabra.")
     parser.add_argument("input_video", help="Input video file to translate.")
-    parser.add_argument("output_wav", help="Final translated WAV file to generate.")
-    parser.add_argument("output_video", nargs="?", help="Optional output video file with the translated audio muxed in.")
+    parser.add_argument(
+        "output_path",
+        nargs="?",
+        help="Optional explicit output path. The extension selects mp3, wav, or video output.",
+    )
+    parser.add_argument(
+        "--audio",
+        nargs="?",
+        const="mp3",
+        choices=("mp3", "wav"),
+        help="Save translated audio as mp3 or wav. Defaults to mp3 when no output switch is provided.",
+    )
+    parser.add_argument("--video", action="store_true", help="Save a video with the translated audio muxed in.")
     parser.add_argument("--voice-id", help="Override the configured Palabra voice_id.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.output_path and (args.audio is not None or args.video):
+        parser.error("output_path cannot be combined with --audio or --video")
+    return args
 
 
 def main() -> int:
@@ -814,9 +913,44 @@ def main() -> int:
     config_path = Path("config.toml").resolve()
     load_dotenv(config_path.with_name(".env"))
     config = apply_env_overrides(load_config(config_path))
-    config["input_video"] = args.input_video
-    config["output_wav"] = args.output_wav
-    config["output_video"] = args.output_video
+    input_video = Path(args.input_video).resolve()
+    target_language = str(config.get("target_language", ""))
+    output_audio = None
+    output_video = None
+
+    if args.output_path:
+        explicit_output = Path(args.output_path).resolve()
+        try:
+            output_kind, audio_format = classify_output_path(explicit_output)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        if output_kind == "audio":
+            output_audio = explicit_output
+        else:
+            output_video = explicit_output
+    else:
+        audio_format = args.audio
+        if audio_format is None and not args.video:
+            audio_format = "mp3"
+        if audio_format:
+            output_audio = default_audio_output_path(input_video, audio_format, target_language)
+        if args.video:
+            output_video = default_video_output_path(input_video, target_language)
+
+    working_wav = output_audio if audio_format == "wav" and output_audio else default_audio_output_path(
+        input_video, "wav", target_language
+    )
+    if audio_format != "wav":
+        working_parent = output_video.parent if output_video else (output_audio.parent if output_audio else input_video.parent)
+        working_stem = output_video.stem if output_video else (output_audio.stem if output_audio else output_stem(input_video, target_language))
+        working_wav = working_parent / f"{working_stem}.working.wav"
+
+    config["input_video"] = str(input_video)
+    config["audio_format"] = audio_format
+    config["working_wav"] = str(working_wav)
+    config["output_audio"] = str(output_audio) if output_audio else None
+    config["output_video"] = str(output_video) if output_video else None
 
     if args.voice_id:
         config["voice_id"] = args.voice_id
@@ -840,7 +974,10 @@ def main() -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
-    print(f"Translated WAV saved to: {Path(config['output_wav']).resolve()}")
+    if config.get("output_audio"):
+        print(f"Translated audio saved to: {Path(config['output_audio']).resolve()}")
+    if config.get("output_video"):
+        print(f"Translated video saved to: {Path(config['output_video']).resolve()}")
     return 0
 
 

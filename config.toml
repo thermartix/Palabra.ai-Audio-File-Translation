@@ -1,5 +1,5 @@
 source_language = "en" # Language spoken in the source video.
-target_language = "de" # Language to synthesize in the translated output.
+target_language = "ro" # Language to synthesize in the translated output.
 speech_mode = "voice_id" # "voice_id" for a fixed voice, or "voice_cloning" to mimic the speaker.
 voice_id = "c9f3cce4-f7f4-4940-b7cb-46ef87341a6e" # Target voice to use when speech_mode = "voice_id".
 ffmpeg_path = "ffmpeg" # ffmpeg executable name or full path.

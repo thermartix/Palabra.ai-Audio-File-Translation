@@ -341,7 +341,11 @@ def build_set_task(config: dict) -> dict:
 
 
 def pcm_chunk_size_bytes(chunk_ms: int) -> int:
+    if chunk_ms <= 0:
+        raise RuntimeError("audio_chunk_ms must be greater than 0")
     frames = int(INPUT_SAMPLE_RATE * (chunk_ms / 1000.0))
+    if frames <= 0:
+        raise RuntimeError("audio_chunk_ms is too small for the configured input sample rate")
     return frames * INPUT_CHANNELS * INPUT_SAMPLE_WIDTH_BYTES
 
 
@@ -392,7 +396,12 @@ async def send_audio(ws, input_wav: Path, chunk_ms: int) -> None:
         log("Finished sending source audio.")
 
 
-async def receive_audio(ws, receive_state: ReceiveState, inactivity_timeout_sec: float) -> None:
+async def receive_audio(
+    ws,
+    receive_state: ReceiveState,
+    inactivity_timeout_sec: float,
+    sender_done: asyncio.Event,
+) -> None:
     received_chunks = 0
     received_bytes = 0
     last_report = time.monotonic()
@@ -400,8 +409,10 @@ async def receive_audio(ws, receive_state: ReceiveState, inactivity_timeout_sec:
         try:
             message = await asyncio.wait_for(ws.recv(), timeout=inactivity_timeout_sec)
         except asyncio.TimeoutError:
-            log("No more translated audio received within timeout window. Finalizing WAV file...")
-            return
+            if sender_done.is_set():
+                log("No more translated audio received within timeout window. Finalizing WAV file...")
+                return
+            continue
 
         payload = json.loads(message)
         message_type = payload.get("message_type")
@@ -500,15 +511,13 @@ def build_segment_manifest(config: dict, receive_state: ReceiveState) -> tuple[l
     else:
         latency_offset_sec = 0.0
 
-    previous_end_sec = 0.0
     previous_source_end_sec = 0.0
     for item in manifest:
         source_end_sec = max(0.0, item["source_end_sec_raw"] - latency_offset_sec)
-        source_end_sec = max(source_end_sec, previous_end_sec)
-        source_duration_sec = max(0.0, source_end_sec - previous_source_end_sec)
+        source_end_sec = max(source_end_sec, previous_source_end_sec)
+        source_duration_sec = source_end_sec - previous_source_end_sec
         item["source_end_sec"] = source_end_sec
         item["source_duration_sec"] = source_duration_sec
-        previous_end_sec = source_end_sec
         previous_source_end_sec = source_end_sec
 
     return manifest, latency_offset_sec
@@ -823,13 +832,34 @@ async def run_pipeline(config: dict) -> None:
             async with websockets.connect(endpoint, max_size=None) as ws:
                 log("Connected. Sending translation task configuration...")
                 await ws.send(json.dumps(build_set_task(config)))
+                sender_done = asyncio.Event()
                 sender = asyncio.create_task(send_audio(ws, temp_input_wav, int(config.get("audio_chunk_ms", 320))))
                 receiver = asyncio.create_task(
-                    receive_audio(ws, receive_state, float(config.get("output_inactivity_timeout_sec", 8.0)))
+                    receive_audio(
+                        ws,
+                        receive_state,
+                        float(config.get("output_inactivity_timeout_sec", 8.0)),
+                        sender_done,
+                    )
                 )
 
-                await sender
-                await receiver
+                try:
+                    done, _ = await asyncio.wait({sender, receiver}, return_when=asyncio.FIRST_COMPLETED)
+                    if receiver in done:
+                        receiver.result()
+                        raise RuntimeError("Translated audio receiver stopped before source audio finished streaming.")
+
+                    sender.result()
+                    sender_done.set()
+                    await receiver
+                except Exception:
+                    sender_done.set()
+                    if not sender.done():
+                        sender.cancel()
+                    if not receiver.done():
+                        receiver.cancel()
+                    await asyncio.gather(sender, receiver, return_exceptions=True)
+                    raise
 
                 try:
                     await ws.send(json.dumps({"message_type": "end_task", "data": {}}))

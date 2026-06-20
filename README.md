@@ -15,8 +15,10 @@ In Palabra, voice cloning means the translated speech tries to sound like the or
 
 If you want a fixed voice, set:
 
-- `voice_cloning: false`
-- `voice_id: "<your configured voice id>"`
+- `speech_mode = "voice_id"`
+- `voice_id = "<your configured voice id>"`
+
+With `speech_mode = "voice_id"`, voice cloning is disabled by default.
 
 If you want speaker-matching behavior, set:
 

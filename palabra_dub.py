@@ -79,6 +79,15 @@ def normalize_alignment_mode(config: dict) -> str:
     return mode
 
 
+def normalize_mp4_audio_bitrate(config: dict) -> str | None:
+    bitrate = str(config.get("mp4_audio_bitrate", "auto")).strip().lower()
+    if bitrate == "auto":
+        return None
+    if bitrate not in {"64k", "80k", "96k", "128k", "160k"}:
+        raise RuntimeError("mp4_audio_bitrate must be 'auto', '64k', '80k', '96k', '128k', or '160k'")
+    return bitrate
+
+
 def load_config(path: Path) -> dict:
     with path.open("rb") as fh:
         return tomllib.load(fh)
@@ -154,7 +163,17 @@ def extract_audio_to_wav(input_video: Path, output_wav: Path, ffmpeg_path: str) 
     run_command(command)
 
 
-def mux_audio_back_to_video(input_video: Path, input_audio: Path, output_video: Path, ffmpeg_path: str) -> None:
+def mux_audio_back_to_video(
+    input_video: Path,
+    input_audio: Path,
+    output_video: Path,
+    ffmpeg_path: str,
+    audio_bitrate: str | None,
+) -> None:
+    audio_options = ["-c:a", "aac"]
+    if audio_bitrate:
+        audio_options.extend(["-b:a", audio_bitrate])
+
     command = ffmpeg_command(
         ffmpeg_path,
         "-y",
@@ -168,8 +187,7 @@ def mux_audio_back_to_video(input_video: Path, input_audio: Path, output_video: 
         "1:a:0",
         "-c:v",
         "copy",
-        "-c:a",
-        "aac",
+        *audio_options,
         "-shortest",
         str(output_video),
     )
@@ -195,11 +213,58 @@ def run_ffmpeg(command: list[str]) -> None:
     run_command(command)
 
 
-def log(message: str) -> None:
+_LIVE_STATUS_LINES: dict[str, str] = {}
+_LIVE_STATUS_ORDER = ("received", "sent", "finished")
+_LIVE_STATUS_RENDERED = 0
+
+
+def _clear_animation() -> None:
     global _ANIMATION_ACTIVE
     if _ANIMATION_ACTIVE:
         sys.stdout.write("\r" + (" " * ANIMATION_WIDTH) + "\r")
         _ANIMATION_ACTIVE = False
+
+
+def _live_status_values() -> list[str]:
+    return [line for key in _LIVE_STATUS_ORDER if (line := _LIVE_STATUS_LINES.get(key))]
+
+
+def _render_live_status() -> None:
+    global _LIVE_STATUS_RENDERED
+    lines = _live_status_values()
+    line_count = max(_LIVE_STATUS_RENDERED, len(lines))
+
+    if _LIVE_STATUS_RENDERED:
+        sys.stdout.write(f"\x1b[{_LIVE_STATUS_RENDERED}A")
+
+    for index in range(line_count):
+        line = lines[index] if index < len(lines) else ""
+        sys.stdout.write("\r\x1b[2K" + line)
+        if index < line_count - 1:
+            sys.stdout.write("\n")
+
+    if lines:
+        sys.stdout.write("\n")
+
+    sys.stdout.flush()
+    _LIVE_STATUS_RENDERED = len(lines)
+
+
+def update_live_status(key: str, message: str) -> None:
+    _clear_animation()
+    _LIVE_STATUS_LINES[key] = message
+    _render_live_status()
+
+
+def finish_live_status() -> None:
+    global _LIVE_STATUS_RENDERED
+    if _LIVE_STATUS_RENDERED:
+        _LIVE_STATUS_RENDERED = 0
+
+
+def log(message: str) -> None:
+    _clear_animation()
+    finish_live_status()
     print(message, flush=True)
 
 
@@ -366,7 +431,7 @@ async def send_audio(ws, input_wav: Path, chunk_ms: int) -> None:
                 f"Unexpected input WAV format: rate={sample_rate}, channels={channels}, sample_width={sample_width}"
             )
 
-        log(f"Streaming audio to Palabra in real time ({total_seconds / 60:.1f} minutes total)...")
+        update_live_status("sent", f"Streaming audio to Palabra in real time ({total_seconds / 60:.1f} minutes total)...")
 
         while True:
             chunk = wav_file.readframes(frames_per_chunk)
@@ -386,14 +451,15 @@ async def send_audio(ws, input_wav: Path, chunk_ms: int) -> None:
             sent_seconds = sent_frames / float(sample_rate)
             if sent_seconds - last_progress_print >= 30.0:
                 percent = min(100.0, (sent_seconds / total_seconds) * 100.0) if total_seconds else 100.0
-                log(
+                update_live_status(
+                    "sent",
                     f"Sent {sent_seconds / 60:.1f}/{total_seconds / 60:.1f} minutes "
-                    f"({percent:.1f}%). Waiting for translated audio as it streams back..."
+                    f"({percent:.1f}%). Waiting for translated audio as it streams back...",
                 )
                 last_progress_print = sent_seconds
             await asyncio.sleep(chunk_ms / 1000.0)
 
-        log("Finished sending source audio.")
+        update_live_status("finished", "Finished sending source audio.")
 
 
 async def receive_audio(
@@ -405,14 +471,29 @@ async def receive_audio(
     received_chunks = 0
     received_bytes = 0
     last_report = time.monotonic()
+    last_audio_at = time.monotonic()
     while True:
+        if sender_done.is_set() and time.monotonic() - last_audio_at >= inactivity_timeout_sec:
+            log("No more translated audio received within timeout window. Finalizing WAV file...")
+            return
+
+        timeout = inactivity_timeout_sec
+        if sender_done.is_set():
+            remaining_audio_wait = inactivity_timeout_sec - (time.monotonic() - last_audio_at)
+            timeout = max(0.1, min(1.0, remaining_audio_wait))
+
         try:
-            message = await asyncio.wait_for(ws.recv(), timeout=inactivity_timeout_sec)
+            message = await asyncio.wait_for(ws.recv(), timeout=timeout)
         except asyncio.TimeoutError:
-            if sender_done.is_set():
-                log("No more translated audio received within timeout window. Finalizing WAV file...")
-                return
             continue
+        except websockets.exceptions.ConnectionClosedOK:
+            log("Palabra WebSocket closed cleanly. Finalizing output files...")
+            return
+        except websockets.exceptions.ConnectionClosed as exc:
+            if sender_done.is_set() and exc.code == 1000:
+                log("Palabra WebSocket closed cleanly. Finalizing output files...")
+                return
+            raise
 
         payload = json.loads(message)
         message_type = payload.get("message_type")
@@ -426,6 +507,7 @@ async def receive_audio(
                 segment = receive_state.get_segment(transcription_id)
                 decoded = base64.b64decode(encoded)
                 receive_state.continuous_output_pcm.extend(decoded)
+                last_audio_at = time.monotonic()
                 is_last_chunk = transcription.get("last_chunk") is True
                 if is_last_chunk:
                     segment.last_chunk_received = True
@@ -435,9 +517,10 @@ async def receive_audio(
                 now = time.monotonic()
                 if now - last_report >= 30.0:
                     approx_seconds = received_bytes / float(output_bytes_per_second())
-                    log(
+                    update_live_status(
+                        "received",
                         f"Received {received_chunks} translated chunks "
-                        f"(about {approx_seconds / 60:.1f} minutes of output audio so far)..."
+                        f"(about {approx_seconds / 60:.1f} minutes of output audio so far)...",
                     )
                     last_report = now
         elif message_type == "validated_transcription":
@@ -851,6 +934,10 @@ async def run_pipeline(config: dict) -> None:
 
                     sender.result()
                     sender_done.set()
+                    try:
+                        await ws.send(json.dumps({"message_type": "end_task", "data": {}}))
+                    except Exception:
+                        pass
                     await receiver
                 except Exception:
                     sender_done.set()
@@ -861,10 +948,6 @@ async def run_pipeline(config: dict) -> None:
                     await asyncio.gather(sender, receiver, return_exceptions=True)
                     raise
 
-                try:
-                    await ws.send(json.dumps({"message_type": "end_task", "data": {}}))
-                except Exception:
-                    pass
         finally:
             heartbeat_stop.set()
             await heartbeat_task
@@ -887,7 +970,13 @@ async def run_pipeline(config: dict) -> None:
                 write_alignment_manifest(output_wav, used_manifest, latency_offset_sec)
             if output_video:
                 log(f"Muxing translated audio into video: {output_video.name}")
-                mux_audio_back_to_video(input_video, output_wav, output_video, config.get("ffmpeg_path", "ffmpeg"))
+                mux_audio_back_to_video(
+                    input_video,
+                    output_wav,
+                    output_video,
+                    config.get("ffmpeg_path", "ffmpeg"),
+                    normalize_mp4_audio_bitrate(config),
+                )
             if output_audio and audio_format == "mp3":
                 log(f"Writing translated MP3: {output_audio.name}")
                 convert_wav_to_mp3(output_wav, output_audio, config.get("ffmpeg_path", "ffmpeg"))
@@ -900,7 +989,13 @@ async def run_pipeline(config: dict) -> None:
             write_alignment_manifest(output_wav, used_manifest, latency_offset_sec)
         if output_video:
             log(f"Muxing translated audio into video: {output_video.name}")
-            mux_audio_back_to_video(input_video, output_wav, output_video, config.get("ffmpeg_path", "ffmpeg"))
+            mux_audio_back_to_video(
+                input_video,
+                output_wav,
+                output_video,
+                config.get("ffmpeg_path", "ffmpeg"),
+                normalize_mp4_audio_bitrate(config),
+            )
         if output_audio and audio_format == "mp3":
             log(f"Writing translated MP3: {output_audio.name}")
             convert_wav_to_mp3(output_wav, output_audio, config.get("ffmpeg_path", "ffmpeg"))

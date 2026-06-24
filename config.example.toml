@@ -5,6 +5,7 @@ target_language = "de" # Language to synthesize in the translated output.
 speech_mode = "voice_id" # "voice_id" for a fixed voice, or "voice_cloning" to mimic the speaker.
 voice_id = "YOUR_VOICE_ID" # Target voice to use when speech_mode = "voice_id".
 ffmpeg_path = "ffmpeg" # ffmpeg executable name or full path.
+mp4_audio_bitrate = "Auto" # MP4 AAC audio bitrate: "Auto" lets ffmpeg decide; fixed mono options are "64k", "80k", "96k", "128k", or "160k".
 alignment_mode = "ffmpeg_segments" # "raw", "inline", or "ffmpeg_segments".
 audio_chunk_ms = 320 # Source audio chunk size sent to Palabra over WebSocket.
 output_inactivity_timeout_sec = 8.0 # Stop waiting after this many seconds without returned audio.

@@ -1,7 +1,7 @@
-source_language = "hu" # Language spoken in the source video.
-target_language = "sk" # Language to synthesize in the translated output.
+source_language = "es" # Language spoken in the source video.
+target_language = "cs" # Language to synthesize in the translated output.
 speech_mode = "voice_id" # "voice_id" for a fixed voice, or "voice_cloning" to use Palabra default/generic timbre voices.
-voice_id = "0130fa45-d18a-4dfe-be53-5a48ccf07556" # Target voice to use when speech_mode = "voice_id".
+voice_id = "5d65c31a-7443-4b03-9e9c-9f333bea8c52" # Target voice to use when speech_mode = "voice_id".
 ffmpeg_path = "ffmpeg" # ffmpeg executable name or full path.
 mp4_audio_bitrate = "Auto" # MP4 AAC audio bitrate: "Auto" lets ffmpeg decide; fixed mono options are "64k", "80k", "96k", "128k", or "160k".
 alignment_mode = "ffmpeg_segments" # "raw", "inline", or "ffmpeg_segments".
@@ -21,9 +21,10 @@ segment_max_speedup = 1.15 # Max tempo increase allowed for too-long segments in
 segment_speedup_threshold_sec = 0.15 # Only speed up a segment if it overruns by at least this much.
 pad_output_to_input_duration = true # Pad the finished WAV with silence if it ends too early.
 trim_output_to_input_duration = false # Trim the finished WAV if it runs longer than the source audio.
-write_alignment_debug_json = true # Write a .segments.json file with timing/debug details.
+write_alignment_debug_json = true # Write .segments.json plus Palabra input sidecars for timing/debug analysis.
 
 
 # voice database:
 # EN Mike Potillo c9f3cce4-f7f4-4940-b7cb-46ef87341a6e
 # HU Sándor Dobi 0130fa45-d18a-4dfe-be53-5a48ccf07556
+# CZ Male 5d65c31a-7443-4b03-9e9c-9f333bea8c52

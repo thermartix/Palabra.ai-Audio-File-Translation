@@ -83,8 +83,15 @@ Phrase-alignment fields:
 - `normalize_source_timestamps = true`
 - `segment_alignment_strategy = "pad_or_speedup"`
 - `segment_max_speedup = 1.15`
+- `subtitle_max_speedup = 1.35`
+- `subtitle_tts_max_chars = 256`
+- `subtitle_tts_text_chunk_delay_ms = 50`
+- `subtitle_tts_phrase_delay_ms = 0`
+- `subtitle_silence_trim_padding_sec = 0.0`
 - `segment_speedup_threshold_sec = 0.15`
 - `write_alignment_debug_json = true`
+
+When `write_alignment_debug_json = true`, the script also writes the original Palabra input next to the analysis output: `.palabra-input.wav` for normal audio dubbing, or `.palabra-input.json` for subtitle TTS messages.
 
 Alignment mode options:
 
@@ -130,6 +137,20 @@ Audio and video output together:
 python palabra_dub.py input_file.mp4 --audio wav --video
 ```
 
+Subtitle-timed voiceover from an `.sbv` file:
+
+```bash
+python palabra_dub.py input_file.mp4 --subtitles corrected_translation.sbv
+python palabra_dub.py input_file.mp4 corrected_voiceover.mp4 --subtitles corrected_translation.sbv
+python palabra_dub.py input_file.mp4 --audio wav --subtitles corrected_translation.sbv
+```
+
+With `--subtitles`, the `.sbv` text is treated as the final spoken text. The script generates one Palabra TTS phrase per cue and starts each phrase at its cue start time when the timeline is caught up. If the previous phrase still runs long after allowed speedup, the next phrase starts immediately after it instead of cutting speech, and later shorter phrases can catch the timeline back up. Cue end times do not force slowdown; phrase audio is not clipped except at the final video duration if trimming is enabled. If the `.sbv` extends past the video duration, the script warns, skips cues that start after the video ends, clips the final usable cue boundary to the video length, and trims the voiceover WAV before muxing.
+
+`subtitle_tts_max_chars = 256` keeps text chunks within Palabra limits. Long subtitle cues are streamed with one shared generation id, so they remain one phrase instead of separate audio snippets.
+
+Palabra documents a 256-character maximum per realtime TTS text message and a 50 text messages/sec rate limit. `subtitle_tts_text_chunk_delay_ms = 50` adds gentle pacing between chunks of a long cue; increase it if long cues still lose text. `subtitle_tts_phrase_delay_ms` can add a pause between completed cue requests for debugging.
+
 Optional override:
 
 ```bash
@@ -137,6 +158,8 @@ python palabra_dub.py input_file.mp4 --audio --voice-id YOUR_OTHER_VOICE_ID
 ```
 
 Without an explicit output path, outputs are saved next to the input as `input_file_dubbed_DE.mp3`, `input_file_dubbed_DE.wav`, and/or `input_file_dubbed_DE.mp4`, using the configured `target_language` code. With an explicit `output.xxx`, the extension selects audio or video output and the provided path is used as-is.
+
+Concurrent runs can use the same input video as long as each run uses a different output path. Per-run scratch files are written into a unique temporary work directory next to the working WAV, then cleaned up at the end.
 
 ## Repo Safety
 
@@ -152,6 +175,7 @@ Without an explicit output path, outputs are saved next to the input as `input_f
 - The script creates temporary `*.raw.wav`, extracted input WAV, and segment working files during processing, then deletes them when the run finishes.
 - The default `ffmpeg_segments` mode is safer than inline rewriting because it leaves the raw translated stream untouched and does the timing work afterward.
 - If you pass `--video`, the script muxes the translated audio back into the video automatically with `ffmpeg`.
+- If you pass `--subtitles` without an explicit output path, the script defaults to a subtitle-timed video output.
 
 ## Example mux command
 

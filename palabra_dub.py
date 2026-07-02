@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 import urllib.error
@@ -54,6 +55,14 @@ class ReceiveState:
         return segment
 
 
+@dataclasses.dataclass
+class SubtitleCue:
+    index: int
+    start_sec: float
+    end_sec: float
+    text: str
+
+
 def output_frame_size_bytes() -> int:
     return OUTPUT_CHANNELS * OUTPUT_SAMPLE_WIDTH_BYTES
 
@@ -86,6 +95,133 @@ def normalize_mp4_audio_bitrate(config: dict) -> str | None:
     if bitrate not in {"64k", "80k", "96k", "128k", "160k"}:
         raise RuntimeError("mp4_audio_bitrate must be 'auto', '64k', '80k', '96k', '128k', or '160k'")
     return bitrate
+
+
+def parse_sbv_timestamp(value: str) -> float:
+    pieces = value.strip().split(":")
+    if len(pieces) != 3:
+        raise ValueError(f"Invalid SBV timestamp: {value}")
+    hours = int(pieces[0])
+    minutes = int(pieces[1])
+    seconds = float(pieces[2].replace(",", "."))
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def parse_sbv_file(path: Path) -> list[SubtitleCue]:
+    if not path.exists():
+        raise FileNotFoundError(f"Subtitle file not found: {path}")
+
+    raw_text = path.read_text(encoding="utf-8-sig")
+    blocks = raw_text.replace("\r\n", "\n").replace("\r", "\n").split("\n\n")
+    cues: list[SubtitleCue] = []
+
+    for block in blocks:
+        lines = [line.strip() for line in block.split("\n") if line.strip()]
+        if not lines:
+            continue
+        if "," not in lines[0]:
+            raise ValueError(f"Invalid SBV cue timing line: {lines[0]}")
+        start_raw, end_raw = lines[0].split(",", 1)
+        start_sec = parse_sbv_timestamp(start_raw)
+        end_sec = parse_sbv_timestamp(end_raw)
+        text = " ".join(lines[1:]).strip()
+        if not text:
+            continue
+        if end_sec < start_sec:
+            raise ValueError(f"SBV cue ends before it starts: {lines[0]}")
+        cues.append(SubtitleCue(index=len(cues) + 1, start_sec=start_sec, end_sec=end_sec, text=text))
+
+    if not cues:
+        raise ValueError(f"No usable subtitle cues found in: {path}")
+    cues.sort(key=lambda cue: cue.start_sec)
+    return cues
+
+
+def subtitle_tts_language(config: dict) -> str:
+    return str(config.get("subtitle_tts_language") or config.get("target_language") or config.get("source_language") or "").strip()
+
+
+def subtitle_tts_voice_options(config: dict) -> dict:
+    voice_id = config.get("voice_id")
+    if not voice_id:
+        raise RuntimeError("voice_id is required for subtitle TTS mode")
+    return {
+        "voice_id": voice_id,
+        "speed": float(config.get("subtitle_tts_speed", 0.5)),
+        "deaccent_strength": float(config.get("subtitle_tts_deaccent_strength", 1.0)),
+    }
+
+
+def trim_pcm_to_frame_boundary(pcm_data: bytes) -> bytes:
+    frame_size = output_frame_size_bytes()
+    extra_bytes = len(pcm_data) % frame_size
+    if extra_bytes:
+        return pcm_data[:-extra_bytes]
+    return pcm_data
+
+
+def pcm_sample_values(pcm_data: bytes) -> list[int]:
+    frame_size = output_frame_size_bytes()
+    pcm_data = trim_pcm_to_frame_boundary(pcm_data)
+    return [int.from_bytes(pcm_data[i : i + frame_size], "little", signed=True) for i in range(0, len(pcm_data), frame_size)]
+
+
+def trim_pcm_silence(pcm_data: bytes, threshold: int = 160, padding_sec: float = 0.03) -> tuple[bytes, float, float]:
+    pcm_data = trim_pcm_to_frame_boundary(pcm_data)
+    samples = pcm_sample_values(pcm_data)
+    if not samples:
+        return b"", 0.0, 0.0
+
+    first = 0
+    while first < len(samples) and abs(samples[first]) <= threshold:
+        first += 1
+    if first == len(samples):
+        return b"", len(samples) / float(OUTPUT_SAMPLE_RATE), 0.0
+
+    last = len(samples) - 1
+    while last > first and abs(samples[last]) <= threshold:
+        last -= 1
+
+    padding_frames = int(round(padding_sec * OUTPUT_SAMPLE_RATE))
+    start_frame = max(0, first - padding_frames)
+    end_frame = min(len(samples), last + 1 + padding_frames)
+    trimmed = pcm_data[start_frame * output_frame_size_bytes() : end_frame * output_frame_size_bytes()]
+    leading_trim_sec = start_frame / float(OUTPUT_SAMPLE_RATE)
+    trailing_trim_sec = (len(samples) - end_frame) / float(OUTPUT_SAMPLE_RATE)
+    return trimmed, leading_trim_sec, trailing_trim_sec
+
+
+def overlay_pcm_at(output_pcm: bytearray, start_sec: float, segment_pcm: bytes) -> None:
+    start_byte = seconds_to_output_frame_bytes(start_sec)
+    end_byte = start_byte + len(segment_pcm)
+    if len(output_pcm) < end_byte:
+        output_pcm.extend(b"\x00" * (end_byte - len(output_pcm)))
+    output_pcm[start_byte:end_byte] = segment_pcm
+
+
+def trim_pcm_duration(pcm_data: bytes, duration_sec: float) -> bytes:
+    if duration_sec <= 0:
+        return b""
+    target_bytes = seconds_to_output_frame_bytes(duration_sec)
+    return pcm_data[:target_bytes]
+
+
+def trim_subtitle_cues_to_duration(cues: list[SubtitleCue], duration_sec: float) -> tuple[list[SubtitleCue], bool, int]:
+    usable: list[SubtitleCue] = []
+    skipped = 0
+    clipped = False
+
+    for cue in cues:
+        if cue.start_sec >= duration_sec:
+            skipped += 1
+            clipped = True
+            continue
+        end_sec = min(cue.end_sec, duration_sec)
+        if end_sec != cue.end_sec:
+            clipped = True
+        usable.append(SubtitleCue(index=cue.index, start_sec=cue.start_sec, end_sec=end_sec, text=cue.text))
+
+    return usable, clipped, skipped
 
 
 def load_config(path: Path) -> dict:
@@ -318,6 +454,57 @@ def create_session(client_id: str, client_secret: str) -> dict:
     return data["data"]
 
 
+def build_tts_init(config: dict) -> dict:
+    language = subtitle_tts_language(config)
+    if not language:
+        raise RuntimeError("target_language or subtitle_tts_language is required for subtitle TTS mode")
+
+    return {
+        "type": "init",
+        "language": language,
+        "model": str(config.get("subtitle_tts_model", "auto")),
+        "voice_options": subtitle_tts_voice_options(config),
+        "output": {
+            "format": "pcm",
+            "sample_rate": OUTPUT_SAMPLE_RATE,
+        },
+    }
+
+
+def split_tts_text(text: str, max_chars: int) -> list[str]:
+    normalized = " ".join(text.split())
+    if not normalized:
+        return []
+    if max_chars <= 0 or len(normalized) <= max_chars:
+        return [normalized]
+
+    chunks: list[str] = []
+    remaining = normalized
+    while len(remaining) > max_chars:
+        split_at = remaining.rfind(" ", 0, max_chars + 1)
+        if split_at <= 0:
+            split_at = max_chars
+        chunks.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].strip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+def build_tts_text_messages(text_chunks: list[str], generation_id: str) -> list[dict]:
+    messages: list[dict] = []
+    for index, chunk in enumerate(text_chunks):
+        messages.append(
+            {
+                "type": "text",
+                "text": chunk,
+                "generation_id": generation_id,
+                "is_eos": index == len(text_chunks) - 1,
+            }
+        )
+    return messages
+
+
 def build_set_task(config: dict) -> dict:
     auto_tempo = bool(config.get("auto_tempo", False))
     min_tempo = float(config.get("min_tempo", 1.0))
@@ -540,6 +727,45 @@ async def receive_audio(
             raise RuntimeError(f"Palabra API error: {json.dumps(data)}")
 
 
+async def receive_tts_generation(ws, generation_id: str, inactivity_timeout_sec: float) -> bytes:
+    chunks: list[bytes] = []
+    last_audio_at = time.monotonic()
+
+    while True:
+        try:
+            message = await asyncio.wait_for(ws.recv(), timeout=inactivity_timeout_sec)
+        except asyncio.TimeoutError as exc:
+            if chunks:
+                raise RuntimeError(f"Timed out waiting for final TTS chunk for {generation_id}") from exc
+            raise RuntimeError(f"Timed out waiting for TTS audio for {generation_id}") from exc
+        except websockets.exceptions.ConnectionClosedOK as exc:
+            raise RuntimeError(f"Palabra WebSocket closed before TTS generation finished: {generation_id}") from exc
+
+        payload = json.loads(message)
+        message_type = payload.get("type") or payload.get("message_type")
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+
+        if message_type == "error":
+            raise RuntimeError(f"Palabra API error: {json.dumps(data)}")
+        if message_type != "audio_chunk":
+            continue
+
+        payload_generation_id = data.get("generation_id")
+        if payload_generation_id and payload_generation_id != generation_id:
+            continue
+
+        encoded = data.get("audio") or data.get("data")
+        if encoded:
+            chunks.append(trim_pcm_to_frame_boundary(base64.b64decode(encoded)))
+            last_audio_at = time.monotonic()
+
+        if data.get("last_chunk") is True:
+            return b"".join(chunks)
+
+        if chunks and time.monotonic() - last_audio_at >= inactivity_timeout_sec:
+            return b"".join(chunks)
+
+
 def write_output_wav(output_path: Path, pcm_data: bytes | bytearray) -> None:
     with wave.open(str(output_path), "wb") as wav_file:
         wav_file.setnchannels(OUTPUT_CHANNELS)
@@ -694,6 +920,27 @@ def write_alignment_manifest(output_wav: Path, manifest: list[dict], latency_off
     log(f"Wrote segment alignment manifest: {manifest_path.name}")
 
 
+def write_palabra_input_audio_debug(config: dict, input_wav: Path, output_wav: Path) -> None:
+    if not bool(config.get("write_alignment_debug_json", True)):
+        return
+    debug_path = output_wav.with_suffix(".palabra-input.wav")
+    shutil.copyfile(input_wav, debug_path)
+    log(f"Wrote Palabra input audio debug file: {debug_path.name}")
+
+
+def write_palabra_tts_input_debug(config: dict, output_wav: Path, tts_init: dict, cue_messages: list[dict]) -> None:
+    if not bool(config.get("write_alignment_debug_json", True)):
+        return
+    debug_path = output_wav.with_suffix(".palabra-input.json")
+    payload = {
+        "mode": "subtitle_tts",
+        "init": tts_init,
+        "messages": cue_messages,
+    }
+    debug_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    log(f"Wrote Palabra TTS input debug file: {debug_path.name}")
+
+
 def write_silence_wav(path: Path, duration_sec: float) -> None:
     silence_bytes = seconds_to_output_frame_bytes(duration_sec)
     write_output_wav(path, b"\x00" * silence_bytes)
@@ -777,6 +1024,7 @@ def build_ffmpeg_segment_output(
     input_wav: Path,
     output_wav: Path,
     raw_output_wav: Path,
+    work_dir: Path,
     raw_pcm: bytes | bytearray,
     manifest: list[dict],
 ) -> list[dict]:
@@ -785,7 +1033,6 @@ def build_ffmpeg_segment_output(
         log("No usable segment metadata found. Copied raw translated WAV as final output.")
         return []
 
-    work_dir = output_wav.parent / f"{output_wav.stem}_ffmpeg_segments"
     work_dir.mkdir(exist_ok=True)
     concat_entries: list[Path] = []
     enriched_manifest: list[dict] = []
@@ -882,15 +1129,267 @@ def build_ffmpeg_segment_output(
     return enriched_manifest
 
 
+def speedup_wav_file(config: dict, input_wav: Path, output_wav: Path, tempo: float) -> None:
+    run_ffmpeg(
+        ffmpeg_command(
+            config.get("ffmpeg_path", "ffmpeg"),
+            "-y",
+            "-i",
+            str(input_wav),
+            "-filter:a",
+            build_atempo_filter(tempo),
+            str(output_wav),
+        )
+    )
+
+
+def build_subtitle_timed_output(
+    config: dict,
+    cues: list[SubtitleCue],
+    cue_audio: dict[int, bytes],
+    output_wav: Path,
+    work_dir: Path,
+    target_duration_sec: float,
+) -> list[dict]:
+    work_dir.mkdir(exist_ok=True)
+    output_pcm = bytearray()
+    manifest: list[dict] = []
+    total_padding_sec = 0.0
+    speedup_count = 0
+    delayed_count = 0
+    leading_trim_total_sec = 0.0
+    max_late_start_sec = 0.0
+    max_speedup = max(1.0, float(config.get("subtitle_max_speedup", 2.0)))
+    speedup_threshold_sec = max(0.0, float(config.get("segment_speedup_threshold_sec", 0.15)))
+    silence_threshold = int(config.get("subtitle_silence_trim_threshold", 160))
+    silence_padding_sec = max(0.0, float(config.get("subtitle_silence_trim_padding_sec", 0.0)))
+
+    for cue_number, cue in enumerate(cues):
+        requested_start_sec = cue.start_sec
+        next_start_sec = cues[cue_number + 1].start_sec if cue_number + 1 < len(cues) else target_duration_sec
+        next_start_sec = min(next_start_sec, target_duration_sec)
+        timeline_cursor_sec = pcm_duration_seconds(output_pcm)
+        actual_start_sec = max(requested_start_sec, timeline_cursor_sec)
+        late_start_sec = max(0.0, actual_start_sec - requested_start_sec)
+        if late_start_sec > 0:
+            delayed_count += 1
+            max_late_start_sec = max(max_late_start_sec, late_start_sec)
+
+        if timeline_cursor_sec < actual_start_sec:
+            padding_sec = actual_start_sec - timeline_cursor_sec
+            output_pcm.extend(b"\x00" * seconds_to_output_frame_bytes(padding_sec))
+            total_padding_sec += padding_sec
+
+        original_pcm = cue_audio.get(cue.index, b"")
+        original_duration_sec = pcm_duration_seconds(original_pcm)
+        segment_pcm, leading_trim_sec, trailing_trim_sec = trim_pcm_silence(
+            original_pcm, threshold=silence_threshold, padding_sec=silence_padding_sec
+        )
+        leading_trim_total_sec += leading_trim_sec
+        trimmed_duration_sec = pcm_duration_seconds(segment_pcm)
+        processed_duration_sec = trimmed_duration_sec
+        tempo_applied = 1.0
+
+        available_until_next_sec = max(0.0, next_start_sec - actual_start_sec)
+        if (
+            segment_pcm
+            and available_until_next_sec > 0
+            and trimmed_duration_sec - available_until_next_sec >= speedup_threshold_sec
+        ):
+            required_speedup = trimmed_duration_sec / available_until_next_sec
+            tempo_applied = min(required_speedup, max_speedup)
+            if tempo_applied > 1.0:
+                segment_path = work_dir / f"subtitle_{cue.index:04d}.wav"
+                sped_path = work_dir / f"subtitle_{cue.index:04d}.sped.wav"
+                write_output_wav(segment_path, segment_pcm)
+                speedup_wav_file(config, segment_path, sped_path, tempo_applied)
+                segment_pcm = load_wav_pcm(sped_path)
+                processed_duration_sec = pcm_duration_seconds(segment_pcm)
+                speedup_count += 1
+
+        output_pcm.extend(segment_pcm)
+        timeline_end_sec = pcm_duration_seconds(output_pcm)
+        overrun_sec = max(0.0, timeline_end_sec - next_start_sec) if cue_number + 1 < len(cues) else 0.0
+
+        manifest.append(
+            {
+                "cue_index": cue.index,
+                "source_start_sec": cue.start_sec,
+                "source_end_sec": cue.end_sec,
+                "requested_timeline_start_sec": requested_start_sec,
+                "timeline_start_sec": actual_start_sec,
+                "late_start_sec": late_start_sec,
+                "next_start_sec": next_start_sec,
+                "available_duration_sec": available_until_next_sec,
+                "output_audio_duration_sec": original_duration_sec,
+                "trimmed_audio_duration_sec": trimmed_duration_sec,
+                "processed_audio_duration_sec": processed_duration_sec,
+                "leading_silence_trimmed_sec": leading_trim_sec,
+                "trailing_silence_trimmed_sec": trailing_trim_sec,
+                "tempo_applied": round(tempo_applied, 5),
+                "timeline_end_sec": timeline_end_sec,
+                "clipped_sec": 0.0,
+                "overrun_sec": overrun_sec,
+                "text": cue.text,
+            }
+        )
+
+    if bool(config.get("pad_output_to_input_duration", True)) and pcm_duration_seconds(output_pcm) < target_duration_sec:
+        padding_sec = target_duration_sec - pcm_duration_seconds(output_pcm)
+        output_pcm.extend(b"\x00" * seconds_to_output_frame_bytes(padding_sec))
+        total_padding_sec += padding_sec
+
+    if bool(config.get("trim_output_to_input_duration", False)) and pcm_duration_seconds(output_pcm) > target_duration_sec:
+        del output_pcm[seconds_to_output_frame_bytes(target_duration_sec):]
+
+    write_output_wav(output_wav, output_pcm)
+    log(
+        f"Subtitle alignment trimmed {leading_trim_total_sec:.2f} seconds of leading generated silence, "
+        f"inserted {total_padding_sec:.2f} seconds of silence, sped up {speedup_count} phrases, "
+        f"and delayed {delayed_count} phrase starts by up to {max_late_start_sec:.2f} seconds without clipping speech."
+    )
+    return manifest
+
+
+async def run_subtitle_pipeline(config: dict) -> None:
+    input_video = Path(config["input_video"]).resolve()
+    subtitle_path = Path(config["subtitle_path"]).resolve()
+    audio_format = config.get("audio_format")
+    output_wav = Path(config["working_wav"]).resolve()
+    output_audio = Path(config["output_audio"]).resolve() if config.get("output_audio") else None
+    output_video = Path(config["output_video"]).resolve() if config.get("output_video") else None
+    run_work_dir = Path(tempfile.mkdtemp(prefix=f".{output_wav.stem}.", suffix=".subtitle.work", dir=output_wav.parent))
+    temp_input_wav = run_work_dir / "input_16k_mono.wav"
+    subtitle_work_dir = run_work_dir / "subtitle_segments"
+
+    if not input_video.exists():
+        raise FileNotFoundError(f"Input video not found: {input_video}")
+
+    try:
+        cues = parse_sbv_file(subtitle_path)
+        original_cue_count = len(cues)
+        log(f"Loaded {len(cues)} subtitle cues from: {subtitle_path.name}")
+        log(f"Extracting audio duration from: {input_video.name}")
+        extract_audio_to_wav(input_video, temp_input_wav, config.get("ffmpeg_path", "ffmpeg"))
+        input_duration_sec = get_wav_duration_seconds(temp_input_wav)
+        cues, clipped_to_video, skipped_cue_count = trim_subtitle_cues_to_duration(cues, input_duration_sec)
+        if clipped_to_video:
+            log(
+                f"Warning: subtitle timings extend past the {input_duration_sec:.2f}s video duration. "
+                f"Using {len(cues)}/{original_cue_count} cues and trimming voiceover to the video length."
+            )
+            if skipped_cue_count:
+                log(f"Skipped {skipped_cue_count} subtitle cues that start after the video ends.")
+        if not cues:
+            raise RuntimeError("No subtitle cues start before the video ends.")
+
+        log("Creating Palabra TTS session...")
+        session = create_session(config["client_id"], config["client_secret"])
+        ws_tts_url = session.get("ws_tts_url")
+        if not ws_tts_url:
+            raise RuntimeError("Palabra session response did not include ws_tts_url for realtime TTS")
+        publisher = session["publisher"]
+        delimiter = "&" if "?" in ws_tts_url else "?"
+        endpoint = f"{ws_tts_url}{delimiter}token={urllib.parse.quote(publisher)}"
+
+        cue_audio: dict[int, bytes] = {}
+        tts_init_debug: dict | None = None
+        tts_input_messages: list[dict] = []
+        heartbeat_stop = asyncio.Event()
+        heartbeat_task = asyncio.create_task(animate_progress("Palabra subtitle TTS running", heartbeat_stop))
+        try:
+            async with websockets.connect(endpoint, max_size=None) as ws:
+                log("Connected. Sending TTS init configuration...")
+                tts_init = build_tts_init(config)
+                tts_init_debug = tts_init
+                log(
+                    f"Using Palabra TTS voice_id={tts_init['voice_options']['voice_id']} "
+                    f"language={tts_init['language']} model={tts_init['model']}"
+                )
+                if tts_init["language"] != str(config.get("source_language", "")).strip():
+                    log(
+                        "Note: realtime TTS voices may be language-specific. If this voice_id belongs to another "
+                        "language, Palabra may substitute a generic voice for subtitle TTS."
+                    )
+                await ws.send(json.dumps(tts_init))
+                max_chars = int(config.get("subtitle_tts_max_chars", 256))
+                chunk_delay_sec = max(0.0, float(config.get("subtitle_tts_text_chunk_delay_ms", 50)) / 1000.0)
+                phrase_delay_sec = max(0.0, float(config.get("subtitle_tts_phrase_delay_ms", 0)) / 1000.0)
+                if chunk_delay_sec > 0:
+                    log(f"Using {chunk_delay_sec * 1000:.0f} ms delay between TTS text chunks.")
+                if phrase_delay_sec > 0:
+                    log(f"Using {phrase_delay_sec * 1000:.0f} ms delay between subtitle TTS phrases.")
+                for position, cue in enumerate(cues, start=1):
+                    text_chunks = split_tts_text(cue.text, max_chars)
+                    if len(text_chunks) > 1:
+                        log(f"Cue {cue.index} is streamed to TTS in {len(text_chunks)} text chunks because it is long.")
+                    update_live_status("sent", f"Generating subtitle phrase {position}/{len(cues)}...")
+                    generation_id = f"subtitle-{cue.index:04d}"
+                    messages = build_tts_text_messages(text_chunks, generation_id)
+                    for message_index, message in enumerate(messages):
+                        tts_input_messages.append(
+                            {
+                                "cue_index": cue.index,
+                                "message": message,
+                            }
+                        )
+                        await ws.send(json.dumps(message))
+                        if chunk_delay_sec > 0 and message_index + 1 < len(messages):
+                            await asyncio.sleep(chunk_delay_sec)
+                    cue_audio[cue.index] = await receive_tts_generation(
+                        ws, generation_id, float(config.get("output_inactivity_timeout_sec", 8.0))
+                    )
+                    if phrase_delay_sec > 0 and position < len(cues):
+                        await asyncio.sleep(phrase_delay_sec)
+        finally:
+            heartbeat_stop.set()
+            await heartbeat_task
+
+        log(f"Writing subtitle-timed WAV: {output_wav.name}")
+        subtitle_output_config = dict(config)
+        subtitle_output_config["trim_output_to_input_duration"] = True
+        manifest = build_subtitle_timed_output(
+            subtitle_output_config, cues, cue_audio, output_wav, subtitle_work_dir, input_duration_sec
+        )
+        if bool(config.get("write_alignment_debug_json", True)):
+            write_alignment_manifest(output_wav, manifest, 0.0)
+            if tts_init_debug is not None:
+                write_palabra_tts_input_debug(config, output_wav, tts_init_debug, tts_input_messages)
+        if output_video:
+            log(f"Muxing subtitle voiceover into video: {output_video.name}")
+            mux_audio_back_to_video(
+                input_video,
+                output_wav,
+                output_video,
+                config.get("ffmpeg_path", "ffmpeg"),
+                normalize_mp4_audio_bitrate(config),
+            )
+        if output_audio and audio_format == "mp3":
+            log(f"Writing subtitle voiceover MP3: {output_audio.name}")
+            convert_wav_to_mp3(output_wav, output_audio, config.get("ffmpeg_path", "ffmpeg"))
+    finally:
+        cleanup_candidates = [run_work_dir]
+        if audio_format != "wav":
+            cleanup_candidates.append(output_wav)
+        for path in cleanup_candidates:
+            try:
+                cleanup_path(path)
+            except OSError as exc:
+                log(f"Could not delete temporary file {path}: {exc}")
+
+
 async def run_pipeline(config: dict) -> None:
     input_video = Path(config["input_video"]).resolve()
     audio_format = config.get("audio_format")
     output_wav = Path(config["working_wav"]).resolve()
     output_audio = Path(config["output_audio"]).resolve() if config.get("output_audio") else None
     output_video = Path(config["output_video"]).resolve() if config.get("output_video") else None
-    temp_input_wav = output_wav.with_name(f"{output_wav.stem}.input_16k_mono.wav")
-    raw_output_wav = output_wav.with_name(f"{output_wav.stem}.raw.wav")
-    segment_work_dir = output_wav.parent / f"{output_wav.stem}_ffmpeg_segments"
+    run_work_dir = Path(
+        tempfile.mkdtemp(prefix=f".{output_wav.stem}.", suffix=".work", dir=output_wav.parent)
+    )
+    temp_input_wav = run_work_dir / "input_16k_mono.wav"
+    raw_output_wav = run_work_dir / "raw.wav"
+    segment_work_dir = run_work_dir / "ffmpeg_segments"
 
     if not input_video.exists():
         raise FileNotFoundError(f"Input video not found: {input_video}")
@@ -898,6 +1397,7 @@ async def run_pipeline(config: dict) -> None:
     try:
         log(f"Extracting audio from: {input_video.name}")
         extract_audio_to_wav(input_video, temp_input_wav, config.get("ffmpeg_path", "ffmpeg"))
+        write_palabra_input_audio_debug(config, temp_input_wav, output_wav)
         log("Creating Palabra streaming session...")
         session = create_session(config["client_id"], config["client_secret"])
 
@@ -965,7 +1465,15 @@ async def run_pipeline(config: dict) -> None:
         elif alignment_mode == "inline":
             output_pcm, used_manifest = build_inline_aligned_output(config, receive_state, manifest)
         else:
-            used_manifest = build_ffmpeg_segment_output(config, temp_input_wav, output_wav, raw_output_wav, raw_pcm, manifest)
+            used_manifest = build_ffmpeg_segment_output(
+                config,
+                temp_input_wav,
+                output_wav,
+                raw_output_wav,
+                segment_work_dir,
+                raw_pcm,
+                manifest,
+            )
             if bool(config.get("write_alignment_debug_json", True)):
                 write_alignment_manifest(output_wav, used_manifest, latency_offset_sec)
             if output_video:
@@ -1000,7 +1508,7 @@ async def run_pipeline(config: dict) -> None:
             log(f"Writing translated MP3: {output_audio.name}")
             convert_wav_to_mp3(output_wav, output_audio, config.get("ffmpeg_path", "ffmpeg"))
     finally:
-        cleanup_candidates = [temp_input_wav, raw_output_wav, segment_work_dir]
+        cleanup_candidates = [run_work_dir]
         if audio_format != "wav":
             cleanup_candidates.extend([output_wav, output_wav.with_suffix(".segments.json")])
         for path in cleanup_candidates:
@@ -1026,6 +1534,7 @@ def parse_args() -> argparse.Namespace:
         help="Save translated audio as mp3 or wav. Defaults to mp3 when no output switch is provided.",
     )
     parser.add_argument("--video", action="store_true", help="Save a video with the translated audio muxed in.")
+    parser.add_argument("--subtitles", help="Create the voiceover from a timed .sbv subtitle file instead of source audio transcription.")
     parser.add_argument("--voice-id", help="Override the configured Palabra voice_id.")
     args = parser.parse_args()
     if args.output_path and (args.audio is not None or args.video):
@@ -1056,7 +1565,9 @@ def main() -> int:
             output_video = explicit_output
     else:
         audio_format = args.audio
-        if audio_format is None and not args.video:
+        if args.subtitles and audio_format is None and not args.video:
+            output_video = default_video_output_path(input_video, target_language)
+        elif audio_format is None and not args.video:
             audio_format = "mp3"
         if audio_format:
             output_audio = default_audio_output_path(input_video, audio_format, target_language)
@@ -1076,6 +1587,7 @@ def main() -> int:
     config["working_wav"] = str(working_wav)
     config["output_audio"] = str(output_audio) if output_audio else None
     config["output_video"] = str(output_video) if output_video else None
+    config["subtitle_path"] = str(Path(args.subtitles).resolve()) if args.subtitles else None
 
     if args.voice_id:
         config["voice_id"] = args.voice_id
@@ -1091,7 +1603,10 @@ def main() -> int:
         raise RuntimeError(f"Missing required config keys: {', '.join(missing)}")
 
     try:
-        asyncio.run(run_pipeline(config))
+        if args.subtitles:
+            asyncio.run(run_subtitle_pipeline(config))
+        else:
+            asyncio.run(run_pipeline(config))
     except subprocess.CalledProcessError as exc:
         print(f"ffmpeg failed with exit code {exc.returncode}", file=sys.stderr)
         return 1

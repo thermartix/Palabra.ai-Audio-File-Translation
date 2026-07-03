@@ -6,7 +6,7 @@ subtitle_tts_voice_id = "" # Optional voice override for --subtitles; leave empt
 ffmpeg_path = "ffmpeg" # ffmpeg executable name or full path.
 mp4_audio_bitrate = "Auto" # MP4 AAC audio bitrate: "Auto" lets ffmpeg decide; fixed mono options are "64k", "80k", "96k", "128k", or "160k".
 alignment_mode = "ffmpeg_segments" # "raw", "inline", or "ffmpeg_segments".
-timing_mode = "palabra" # "palabra" uses Palabra's no-drop auto-tempo defaults; override with --timing-mode for one run.
+timing_mode = "palabra" # Modes: "palabra" = Palabra auto-tempo; "local-rubberband" = local Rubber Band speedup; "local-atempo" = local FFmpeg atempo speedup. Override with --timing-mode for one run.
 time_stretch_engine = "ffmpeg_atempo" # Not used in "palabra" mode; set to "rubberband" only for local-rubberband tests.
 audio_chunk_ms = 320 # Source audio chunk size sent to Palabra over WebSocket.
 output_inactivity_timeout_sec = 10.0 # Stop waiting after this many seconds without returned audio.

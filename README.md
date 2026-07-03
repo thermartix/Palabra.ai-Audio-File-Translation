@@ -57,6 +57,7 @@ Important TOML fields:
 - `speech_mode`
 - `voice_id`
 - `alignment_mode`
+- `timing_mode`
 
 Speech mode options:
 
@@ -67,13 +68,43 @@ When `speech_mode = "voice_cloning"`, `voice_id` is ignored.
 
 Dubbing-oriented timing fields:
 
-- `auto_tempo = false`
+- `timing_mode = "palabra"`
+- `auto_tempo = true`
 - `min_tempo = 1.0`
-- `max_tempo = 1.0`
+- `max_tempo = 1.45`
+- `desired_queue_level_ms = 5000`
+- `max_queue_level_ms = 20000`
 - `pad_output_to_input_duration = true`
 - `alignment_mode = "ffmpeg_segments"`
 
-These help keep output timing closer to the source and pad trailing silence when the translated speech is shorter.
+These are Palabra's recommended no-drop defaults. Palabra support reproduced missing audio when the silence threshold was too low and the queue was too tight. In that failure mode, some segments started returning audio but never sent a final `last_chunk=true`, which left silent gaps in the output.
+
+Keep these values unless you are intentionally testing timing behavior:
+
+- `segment_confirmation_silence_threshold = 0.7`
+- `desired_queue_level_ms = 5000`
+- `max_queue_level_ms = 20000`
+- `auto_tempo = true`
+- `min_tempo = 1.0`
+- `max_tempo = 1.45`
+
+Avoid `segment_confirmation_silence_threshold` below `0.5`; Palabra's recommended range is `0.5` to `0.9`. Avoid tight queues such as `max_queue_level_ms = 8000` with low speed ceilings, because Palabra can drop older queued audio once the queue reaches the maximum.
+
+Timing mode options:
+
+- `timing_mode = "palabra"`: use Palabra's recommended queue and auto-tempo settings; this is the default.
+- `timing_mode = "local-rubberband"`: keep Palabra at normal speed, then locally fit long segments with FFmpeg's Rubber Band filter.
+- `timing_mode = "local-atempo"`: keep Palabra at normal speed, then locally fit long segments with FFmpeg's simpler `atempo` filter.
+- `timing_mode = "config"`: use the raw TOML values exactly as written.
+
+You can override the TOML for one run with `--timing-mode`, for example:
+
+```bash
+python palabra_dub.py input_file.mp4 --video --timing-mode palabra
+python palabra_dub.py input_file.mp4 --video --timing-mode local-rubberband
+```
+
+For local timing tests, `time_stretch_engine = "rubberband"` chooses the Rubber Band filter. Use `time_stretch_engine = "ffmpeg_atempo"` if you want FFmpeg's simpler tempo filter instead.
 
 Phrase-alignment fields:
 
@@ -81,8 +112,9 @@ Phrase-alignment fields:
 - `sentence_splitter_enabled = true`
 - `pad_segments_to_source_timing = true`
 - `normalize_source_timestamps = true`
-- `segment_alignment_strategy = "pad_or_speedup"`
-- `segment_max_speedup = 1.15`
+- `segment_alignment_strategy = "pad_only"` for Palabra timing, or `"pad_or_speedup"` for local timing tests
+- `segment_max_speedup = 1.45`
+- `time_stretch_engine = "rubberband"`
 - `subtitle_max_speedup = 1.35`
 - `subtitle_tts_max_chars = 256`
 - `subtitle_tts_text_chunk_delay_ms = 50`
@@ -104,7 +136,7 @@ Alignment mode options:
 With `segment_alignment_strategy = "pad_or_speedup"`, the offline `ffmpeg_segments` mode will:
 
 - pad short sections with silence
-- speed up slightly too-long sections up to `segment_max_speedup`
+- speed up slightly too-long sections up to `segment_max_speedup` using Rubber Band or `atempo`
 - leave very overlong sections mostly intact rather than introducing extreme compression
 
 ## Usage
@@ -155,6 +187,7 @@ Optional override:
 
 ```bash
 python palabra_dub.py input_file.mp4 --audio --voice-id YOUR_OTHER_VOICE_ID
+python palabra_dub.py input_file.mp4 --video --timing-mode local-rubberband
 ```
 
 Without an explicit output path, outputs are saved next to the input as `input_file_dubbed_DE.mp3`, `input_file_dubbed_DE.wav`, and/or `input_file_dubbed_DE.mp4`, using the configured `target_language` code. With an explicit `output.xxx`, the extension selects audio or video output and the provided path is used as-is.
@@ -171,9 +204,9 @@ Concurrent runs can use the same input video as long as each run uses a differen
 
 - The script extracts audio as `pcm_s16le`, `16 kHz`, mono, which matches the Palabra WebSocket input configuration used here.
 - Palabra returns translated audio chunks. This script rebuilds them into a WAV file at `24 kHz` mono PCM, matching the documented default output.
-- By default, the script disables Palabra auto-tempo and pads trailing silence if the translated audio is shorter than the input.
+- By default, the script uses Palabra's recommended auto-tempo and queue settings to avoid dropped queued audio, then pads trailing silence if the translated audio is shorter than the input.
 - The script creates temporary `*.raw.wav`, extracted input WAV, and segment working files during processing, then deletes them when the run finishes.
-- The default `ffmpeg_segments` mode is safer than inline rewriting because it leaves the raw translated stream untouched and does the timing work afterward.
+- The default `ffmpeg_segments` mode is safer than inline rewriting because it leaves the raw translated stream untouched and does the timing work afterward. Local timing modes can use Rubber Band for higher-quality post-processing speed changes.
 - If you pass `--video`, the script muxes the translated audio back into the video automatically with `ffmpeg`.
 - If you pass `--subtitles` without an explicit output path, the script defaults to a subtitle-timed video output.
 
@@ -186,6 +219,7 @@ ffmpeg -i input.mp4 -i translated.wav -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -
 ## Sources
 
 - https://docs.palabra.ai/docs/streaming_api
+- https://docs.palabra.ai/docs/streaming_api/recommended_settings
 - https://docs.palabra.ai/docs/streaming_api/translation_settings_breakdown
 - https://docs.palabra.ai/docs/streaming_api/publishing_and_receiving_audio
 - https://docs.palabra.ai/docs/streaming_api/session

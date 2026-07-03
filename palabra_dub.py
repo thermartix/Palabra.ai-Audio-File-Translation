@@ -29,6 +29,7 @@ AUDIO_OUTPUT_EXTENSIONS = {".mp3", ".wav"}
 VIDEO_OUTPUT_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
 ANIMATION_WIDTH = 80
 _ANIMATION_ACTIVE = False
+__version__ = "0.3.0"
 
 
 @dataclasses.dataclass
@@ -86,6 +87,13 @@ def normalize_alignment_mode(config: dict) -> str:
     if mode not in {"raw", "inline", "ffmpeg_segments"}:
         raise RuntimeError("alignment_mode must be 'raw', 'inline', or 'ffmpeg_segments'")
     return mode
+
+
+def normalize_time_stretch_engine(config: dict) -> str:
+    engine = str(config.get("time_stretch_engine", "ffmpeg_atempo")).strip().lower()
+    if engine not in {"ffmpeg_atempo", "rubberband"}:
+        raise RuntimeError("time_stretch_engine must be 'ffmpeg_atempo' or 'rubberband'")
+    return engine
 
 
 def normalize_mp4_audio_bitrate(config: dict) -> str | None:
@@ -229,6 +237,79 @@ def load_config(path: Path) -> dict:
         return tomllib.load(fh)
 
 
+def apply_named_palabra_preset(config: dict) -> dict:
+    preset_name = str(config.get("palabra_preset", "")).strip()
+    if not preset_name:
+        return config
+
+    presets = config.get("palabra", {}).get("presets", {})
+    preset = presets.get(preset_name)
+    if not isinstance(preset, dict):
+        available = ", ".join(sorted(presets)) or "none"
+        raise RuntimeError(f"Unknown palabra_preset '{preset_name}'. Available presets: {available}")
+
+    merged = dict(config)
+    merged.update(preset)
+    merged["palabra_preset"] = preset_name
+    return merged
+
+
+def apply_no_drop_palabra_settings(config: dict) -> dict:
+    merged = dict(config)
+    merged.update(
+        {
+            "segment_confirmation_silence_threshold": 0.7,
+            "desired_queue_level_ms": 5000,
+            "max_queue_level_ms": 20000,
+        }
+    )
+    return merged
+
+
+def apply_timing_mode(config: dict, timing_mode: str) -> dict:
+    mode = timing_mode.strip().lower()
+    if mode == "config":
+        return config
+
+    merged = apply_no_drop_palabra_settings(config)
+    if mode == "palabra":
+        merged.update(
+            {
+                "auto_tempo": True,
+                "min_tempo": 1.0,
+                "max_tempo": 1.45,
+                "segment_alignment_strategy": "pad_only",
+            }
+        )
+    elif mode == "local-rubberband":
+        merged.update(
+            {
+                "auto_tempo": False,
+                "min_tempo": 1.0,
+                "max_tempo": 1.0,
+                "segment_alignment_strategy": "pad_or_speedup",
+                "segment_max_speedup": 1.45,
+                "time_stretch_engine": "rubberband",
+            }
+        )
+    elif mode == "local-atempo":
+        merged.update(
+            {
+                "auto_tempo": False,
+                "min_tempo": 1.0,
+                "max_tempo": 1.0,
+                "segment_alignment_strategy": "pad_or_speedup",
+                "segment_max_speedup": 1.45,
+                "time_stretch_engine": "ffmpeg_atempo",
+            }
+        )
+    else:
+        raise RuntimeError("timing_mode must be 'config', 'palabra', 'local-rubberband', or 'local-atempo'")
+
+    merged["timing_mode"] = mode
+    return merged
+
+
 def load_dotenv(dotenv_path: Path) -> None:
     if not dotenv_path.exists():
         return
@@ -246,7 +327,7 @@ def load_dotenv(dotenv_path: Path) -> None:
 
 
 def apply_env_overrides(config: dict) -> dict:
-    merged = dict(config)
+    merged = apply_named_palabra_preset(config)
     env_mappings = {
         "client_id": "PALABRA_CLIENT_ID",
         "client_secret": "PALABRA_CLIENT_SECRET",
@@ -531,6 +612,24 @@ def build_set_task(config: dict) -> dict:
     else:
         speech_generation["voice_id"] = None
 
+    transcription = {
+        "source_language": config["source_language"],
+        "detectable_languages": [],
+        # Palabra reproduced missing audio when this was too low; keep it in the 0.5-0.9s range.
+        "segment_confirmation_silence_threshold": float(
+            config.get("segment_confirmation_silence_threshold", 0.7)
+        ),
+        "sentence_splitter": {
+            "enabled": bool(config.get("sentence_splitter_enabled", True)),
+        },
+        "verification": {
+            "auto_transcription_correction": False,
+            "transcription_correction_style": None,
+        },
+    }
+    if "only_confirm_by_silence" in config:
+        transcription["only_confirm_by_silence"] = bool(config["only_confirm_by_silence"])
+
     return {
         "message_type": "set_task",
         "data": {
@@ -551,29 +650,19 @@ def build_set_task(config: dict) -> dict:
                 },
             },
             "pipeline": {
-                "transcription": {
-                    "source_language": config["source_language"],
-                    "detectable_languages": [],
-                    "segment_confirmation_silence_threshold": float(
-                        config.get("segment_confirmation_silence_threshold", 0.7)
-                    ),
-                    "sentence_splitter": {
-                        "enabled": bool(config.get("sentence_splitter_enabled", True)),
-                    },
-                    "verification": {
-                        "auto_transcription_correction": False,
-                        "transcription_correction_style": None,
-                    },
-                },
+                "transcription": transcription,
                 "translations": [
                     {
                         "target_language": config["target_language"],
-                        "translate_partial_transcriptions": False,
+                        "translate_partial_transcriptions": bool(
+                            config.get("translate_partial_transcriptions", False)
+                        ),
                         "speech_generation": speech_generation,
                     }
                 ],
                 "translation_queue_configs": {
                     "global": {
+                        # If max_queue_level_ms is too tight, Palabra may drop older queued audio.
                         "desired_queue_level_ms": int(config.get("desired_queue_level_ms", 5000)),
                         "max_queue_level_ms": int(config.get("max_queue_level_ms", 20000)),
                         "auto_tempo": auto_tempo,
@@ -962,6 +1051,18 @@ def build_atempo_filter(tempo: float) -> str:
     return ",".join(f"atempo={factor:.5f}" for factor in factors)
 
 
+def build_time_stretch_filter(config: dict, tempo: float) -> str:
+    engine = normalize_time_stretch_engine(config)
+    if engine == "rubberband":
+        return f"rubberband=tempo={tempo:.5f}"
+    return build_atempo_filter(tempo)
+
+
+def time_stretch_engine_label(config: dict) -> str:
+    engine = normalize_time_stretch_engine(config)
+    return "Rubber Band" if engine == "rubberband" else "FFmpeg atempo"
+
+
 def load_wav_pcm(path: Path) -> bytes:
     with wave.open(str(path), "rb") as wav_file:
         channels = wav_file.getnchannels()
@@ -1077,7 +1178,7 @@ def build_ffmpeg_segment_output(
                             "-i",
                             str(segment_path),
                             "-filter:a",
-                            build_atempo_filter(required_speedup),
+                            build_time_stretch_filter(config, required_speedup),
                             str(sped_path),
                         )
                     )
@@ -1124,7 +1225,8 @@ def build_ffmpeg_segment_output(
     fit_output_wav_file_to_input(config, input_wav, output_wav)
     log(
         f"FFmpeg segment alignment inserted {total_padding_sec:.2f} seconds of silence, "
-        f"sped up {speedup_count} segments, used latency compensation, and saw {drift_warnings} boundary overruns."
+        f"sped up {speedup_count} segments with {time_stretch_engine_label(config)}, "
+        f"used latency compensation, and saw {drift_warnings} boundary overruns."
     )
     return enriched_manifest
 
@@ -1137,7 +1239,7 @@ def speedup_wav_file(config: dict, input_wav: Path, output_wav: Path, tempo: flo
             "-i",
             str(input_wav),
             "-filter:a",
-            build_atempo_filter(tempo),
+            build_time_stretch_filter(config, tempo),
             str(output_wav),
         )
     )
@@ -1520,6 +1622,7 @@ async def run_pipeline(config: dict) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate translated speech audio from a video via Palabra.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("input_video", help="Input video file to translate.")
     parser.add_argument(
         "output_path",
@@ -1536,6 +1639,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--video", action="store_true", help="Save a video with the translated audio muxed in.")
     parser.add_argument("--subtitles", help="Create the voiceover from a timed .sbv subtitle file instead of source audio transcription.")
     parser.add_argument("--voice-id", help="Override the configured Palabra voice_id.")
+    parser.add_argument(
+        "--timing-mode",
+        choices=("config", "palabra", "local-rubberband", "local-atempo"),
+        default=None,
+        help=(
+            "Override timing settings: 'palabra' uses Palabra's recommended auto-tempo; "
+            "'local-rubberband' and 'local-atempo' use local segment speedup after receiving audio."
+        ),
+    )
     args = parser.parse_args()
     if args.output_path and (args.audio is not None or args.video):
         parser.error("output_path cannot be combined with --audio or --video")
@@ -1547,6 +1659,7 @@ def main() -> int:
     config_path = Path("config.toml").resolve()
     load_dotenv(config_path.with_name(".env"))
     config = apply_env_overrides(load_config(config_path))
+    config = apply_timing_mode(config, args.timing_mode or str(config.get("timing_mode", "config")))
     input_video = Path(args.input_video).resolve()
     target_language = str(config.get("target_language", ""))
     output_audio = None

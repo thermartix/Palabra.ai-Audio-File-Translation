@@ -29,7 +29,7 @@ AUDIO_OUTPUT_EXTENSIONS = {".mp3", ".wav"}
 VIDEO_OUTPUT_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
 ANIMATION_WIDTH = 80
 _ANIMATION_ACTIVE = False
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 
 @dataclasses.dataclass
@@ -47,6 +47,7 @@ class ReceiveState:
     segments: dict[str, SegmentState] = dataclasses.field(default_factory=dict)
     continuous_output_pcm: bytearray = dataclasses.field(default_factory=bytearray)
     chunk_events: list[tuple[str, bytes, bool]] = dataclasses.field(default_factory=list)
+    voice_metadata_seen: set[str] = dataclasses.field(default_factory=set)
 
     def get_segment(self, transcription_id: str) -> SegmentState:
         segment = self.segments.get(transcription_id)
@@ -150,14 +151,59 @@ def subtitle_tts_language(config: dict) -> str:
 
 
 def subtitle_tts_voice_options(config: dict) -> dict:
-    voice_id = config.get("voice_id")
+    voice_id = config.get("subtitle_tts_voice_id") or config.get("voice_id")
     if not voice_id:
-        raise RuntimeError("voice_id is required for subtitle TTS mode")
+        raise RuntimeError("voice_id or subtitle_tts_voice_id is required for subtitle TTS mode")
     return {
         "voice_id": voice_id,
         "speed": float(config.get("subtitle_tts_speed", 0.5)),
         "deaccent_strength": float(config.get("subtitle_tts_deaccent_strength", 1.0)),
     }
+
+
+def compact_json(value: object, max_chars: int = 500) -> str:
+    text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3] + "..."
+
+
+def collect_voice_metadata(value: object, path: str = "") -> list[tuple[str, object]]:
+    matches: list[tuple[str, object]] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = f"{path}.{key}" if path else str(key)
+            normalized_key = str(key).lower()
+            if "voice" in normalized_key:
+                matches.append((child_path, child))
+            matches.extend(collect_voice_metadata(child, child_path))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            child_path = f"{path}[{index}]" if path else f"[{index}]"
+            matches.extend(collect_voice_metadata(child, child_path))
+    return matches
+
+
+def log_voice_metadata(prefix: str, payload: object, seen: set[str]) -> None:
+    for path, value in collect_voice_metadata(payload):
+        fingerprint = f"{path}={compact_json(value, 300)}"
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        log(f"{prefix} returned {path}: {compact_json(value)}")
+
+
+def format_palabra_message_details(data: object) -> str:
+    if not isinstance(data, dict):
+        return str(data)
+    code = data.get("code") or data.get("error_code") or data.get("type")
+    desc = data.get("desc") or data.get("description") or data.get("message") or data.get("detail")
+    parts = []
+    if code:
+        parts.append(str(code))
+    if desc:
+        parts.append(str(desc))
+    return ": ".join(parts) if parts else compact_json(data)
 
 
 def trim_pcm_to_frame_boundary(pcm_data: bytes) -> bytes:
@@ -648,6 +694,8 @@ def build_set_task(config: dict) -> dict:
                 "target": {
                     "type": "ws",
                     "format": "pcm_s16le",
+                    "sample_rate": OUTPUT_SAMPLE_RATE,
+                    "channels": OUTPUT_CHANNELS,
                 },
             },
             "pipeline": {
@@ -775,6 +823,7 @@ async def receive_audio(
         payload = json.loads(message)
         message_type = payload.get("message_type")
         data = payload.get("data", {})
+        log_voice_metadata("Palabra dubbing response", payload, receive_state.voice_metadata_seen)
 
         if message_type == "output_audio_data":
             transcription = data.get("transcription", data)
@@ -817,9 +866,42 @@ async def receive_audio(
             raise RuntimeError(f"Palabra API error: {json.dumps(data)}")
 
 
-async def receive_tts_generation(ws, generation_id: str, inactivity_timeout_sec: float) -> bytes:
+async def log_current_task_voice_metadata(ws, timeout_sec: float = 3.0) -> None:
+    voice_metadata_seen: set[str] = set()
+    try:
+        await ws.send(json.dumps({"message_type": "get_task", "data": {"exclude_hidden": True}}))
+        message = await asyncio.wait_for(ws.recv(), timeout=max(0.1, timeout_sec))
+    except asyncio.TimeoutError:
+        log("Palabra current_task did not arrive before audio streaming; continuing.")
+        return
+
+    payload = json.loads(message)
+    message_type = payload.get("message_type")
+    data = payload.get("data", {})
+
+    if message_type == "current_task":
+        log_voice_metadata("Palabra current_task", payload, voice_metadata_seen)
+        if not voice_metadata_seen:
+            log("Palabra current_task did not include returned voice_id or other voice metadata.")
+        return
+    if message_type == "warning":
+        log(f"Palabra warning before audio streaming: {format_palabra_message_details(data)}")
+        return
+    if message_type == "error":
+        raise RuntimeError(f"Palabra API error before audio streaming: {format_palabra_message_details(data)}")
+
+    log(f"Palabra message before audio streaming: {compact_json(payload)}")
+
+
+async def receive_tts_generation(
+    ws,
+    generation_id: str,
+    inactivity_timeout_sec: float,
+    voice_metadata_seen: set[str],
+) -> bytes:
     chunks: list[bytes] = []
     last_audio_at = time.monotonic()
+    non_audio_seen: set[str] = set()
 
     while True:
         try:
@@ -834,10 +916,15 @@ async def receive_tts_generation(ws, generation_id: str, inactivity_timeout_sec:
         payload = json.loads(message)
         message_type = payload.get("type") or payload.get("message_type")
         data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        log_voice_metadata("Palabra TTS response", payload, voice_metadata_seen)
 
         if message_type == "error":
             raise RuntimeError(f"Palabra API error: {json.dumps(data)}")
         if message_type != "audio_chunk":
+            fingerprint = compact_json(payload, 500)
+            if fingerprint not in non_audio_seen and len(non_audio_seen) < 20:
+                non_audio_seen.add(fingerprint)
+                log(f"Palabra TTS non-audio message for {generation_id}: {compact_json(payload)}")
             continue
 
         payload_generation_id = data.get("generation_id")
@@ -1398,6 +1485,7 @@ async def run_subtitle_pipeline(config: dict) -> None:
         cue_audio: dict[int, bytes] = {}
         tts_init_debug: dict | None = None
         tts_input_messages: list[dict] = []
+        tts_voice_metadata_seen: set[str] = set()
         heartbeat_stop = asyncio.Event()
         heartbeat_task = asyncio.create_task(animate_progress("Palabra subtitle TTS running", heartbeat_stop))
         try:
@@ -1406,8 +1494,10 @@ async def run_subtitle_pipeline(config: dict) -> None:
                 tts_init = build_tts_init(config)
                 tts_init_debug = tts_init
                 log(
-                    f"Using Palabra TTS voice_id={tts_init['voice_options']['voice_id']} "
-                    f"language={tts_init['language']} model={tts_init['model']}"
+                    f"Sending Palabra TTS init with voice_options.voice_id={tts_init['voice_options']['voice_id']} "
+                    f"language={tts_init['language']} model={tts_init['model']} "
+                    f"speed={tts_init['voice_options'].get('speed')} "
+                    f"deaccent_strength={tts_init['voice_options'].get('deaccent_strength')}"
                 )
                 if tts_init["language"] != str(config.get("source_language", "")).strip():
                     log(
@@ -1440,10 +1530,15 @@ async def run_subtitle_pipeline(config: dict) -> None:
                         if chunk_delay_sec > 0 and message_index + 1 < len(messages):
                             await asyncio.sleep(chunk_delay_sec)
                     cue_audio[cue.index] = await receive_tts_generation(
-                        ws, generation_id, float(config.get("output_inactivity_timeout_sec", 8.0))
+                        ws,
+                        generation_id,
+                        float(config.get("output_inactivity_timeout_sec", 8.0)),
+                        tts_voice_metadata_seen,
                     )
                     if phrase_delay_sec > 0 and position < len(cues):
                         await asyncio.sleep(phrase_delay_sec)
+                if not tts_voice_metadata_seen:
+                    log("Palabra TTS response did not include returned voice_id or other voice metadata.")
         finally:
             heartbeat_stop.set()
             await heartbeat_task
@@ -1517,7 +1612,20 @@ async def run_pipeline(config: dict) -> None:
         try:
             async with websockets.connect(endpoint, max_size=None) as ws:
                 log("Connected. Sending translation task configuration...")
-                await ws.send(json.dumps(build_set_task(config)))
+                set_task = build_set_task(config)
+                translation = set_task["data"]["pipeline"]["translations"][0]
+                speech_generation = translation["speech_generation"]
+                queue_config = set_task["data"]["pipeline"]["translation_queue_configs"]["global"]
+                log(
+                    f"Sending Palabra dubbing set_task with speech_mode={config.get('speech_mode', 'voice_id')} "
+                    f"speech_generation.voice_id={speech_generation.get('voice_id')} "
+                    f"voice_cloning={speech_generation.get('voice_cloning')} "
+                    f"target_language={translation.get('target_language')} "
+                    f"auto_tempo={queue_config.get('auto_tempo')} "
+                    f"tempo={queue_config.get('min_tempo')}-{queue_config.get('max_tempo')}"
+                )
+                await ws.send(json.dumps(set_task))
+                await log_current_task_voice_metadata(ws)
                 sender_done = asyncio.Event()
                 sender = asyncio.create_task(send_audio(ws, temp_input_wav, int(config.get("audio_chunk_ms", 320))))
                 receiver = asyncio.create_task(
@@ -1550,6 +1658,9 @@ async def run_pipeline(config: dict) -> None:
                         receiver.cancel()
                     await asyncio.gather(sender, receiver, return_exceptions=True)
                     raise
+
+            if not receive_state.voice_metadata_seen:
+                log("Palabra dubbing response did not include returned voice_id or other voice metadata.")
 
         finally:
             heartbeat_stop.set()

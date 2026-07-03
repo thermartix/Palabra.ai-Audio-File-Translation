@@ -4,6 +4,7 @@ source_language = "en" # Language spoken in the source video.
 target_language = "de" # Language to synthesize in the translated output.
 speech_mode = "voice_id" # "voice_id" for a fixed voice, or "voice_cloning" to mimic the speaker.
 voice_id = "YOUR_VOICE_ID" # Target voice to use when speech_mode = "voice_id".
+subtitle_tts_voice_id = "" # Optional voice override for --subtitles; leave empty to reuse voice_id.
 ffmpeg_path = "ffmpeg" # ffmpeg executable name or full path.
 mp4_audio_bitrate = "Auto" # MP4 AAC audio bitrate: "Auto" lets ffmpeg decide; fixed mono options are "64k", "80k", "96k", "128k", or "160k".
 alignment_mode = "ffmpeg_segments" # "raw", "inline", or "ffmpeg_segments".

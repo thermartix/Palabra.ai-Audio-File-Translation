@@ -56,6 +56,7 @@ Important TOML fields:
 - `target_language`
 - `speech_mode`
 - `voice_id`
+- `subtitle_tts_voice_id`
 - `alignment_mode`
 - `timing_mode`
 
@@ -65,6 +66,14 @@ Speech mode options:
 - `speech_mode = "voice_cloning"`: mimic the original speaker instead
 
 When `speech_mode = "voice_cloning"`, `voice_id` is ignored.
+
+Subtitle TTS voice selection:
+
+- `voice_id` is used for normal Speech-to-Speech dubbing as `speech_generation.voice_id`.
+- `subtitle_tts_voice_id` is used only with `--subtitles` as `voice_options.voice_id`.
+- Leave `subtitle_tts_voice_id = ""` to reuse `voice_id` for subtitle TTS.
+
+During a run, the script logs the voice id it sends. For normal dubbing it also asks Palabra for `current_task` after `set_task` and logs any voice metadata Palabra returns. For subtitle TTS it logs any voice metadata or non-audio init/status messages Palabra returns on the TTS WebSocket.
 
 Dubbing-oriented timing fields:
 
@@ -180,6 +189,8 @@ python palabra_dub.py input_file.mp4 --audio wav --subtitles corrected_translati
 ```
 
 With `--subtitles`, the `.sbv` text is treated as the final spoken text. The script generates one Palabra TTS phrase per cue and starts each phrase at its cue start time when the timeline is caught up. If the previous phrase still runs long after allowed speedup, the next phrase starts immediately after it instead of cutting speech, and later shorter phrases can catch the timeline back up. Cue end times do not force slowdown; phrase audio is not clipped except at the final video duration if trimming is enabled. If the `.sbv` extends past the video duration, the script warns, skips cues that start after the video ends, clips the final usable cue boundary to the video length, and trims the voiceover WAV before muxing.
+
+For `--subtitles`, make sure the configured TTS voice is valid for the TTS language. The TTS language defaults to `target_language` unless `subtitle_tts_language` is set.
 
 `subtitle_tts_max_chars = 256` keeps text chunks within Palabra limits. Long subtitle cues are streamed with one shared generation id, so they remain one phrase instead of separate audio snippets.
 

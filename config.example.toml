@@ -8,12 +8,12 @@ ffmpeg_path = "ffmpeg" # ffmpeg executable name or full path.
 mp4_audio_bitrate = "Auto" # MP4 AAC audio bitrate: "Auto" lets ffmpeg decide; fixed mono options are "64k", "80k", "96k", "128k", or "160k".
 alignment_mode = "ffmpeg_segments" # "raw", "inline", or "ffmpeg_segments".
 timing_mode = "palabra" # "palabra" uses Palabra's no-drop auto-tempo defaults; override with --timing-mode for one run.
-time_stretch_engine = "rubberband" # Local speedup engine for local-rubberband mode; use "ffmpeg_atempo" for FFmpeg's simpler tempo filter.
+time_stretch_engine = "ffmpeg_atempo" # Not used in "palabra" mode; set to "rubberband" only for local-rubberband tests.
 audio_chunk_ms = 320 # Source audio chunk size sent to Palabra over WebSocket.
 output_inactivity_timeout_sec = 8.0 # Stop waiting after this many seconds without returned audio.
 auto_tempo = true # Palabra recommends true so its queue can drain before old audio is dropped.
-min_tempo = 1.0 # Minimum Palabra TTS tempo multiplier.
-max_tempo = 1.45 # Palabra recommended maximum; lower values can let long/fast speech fill the queue.
+min_tempo = 1.1 # Current Palabra auto-tempo test floor; Palabra's published default is 1.15.
+max_tempo = 1.3 # Current Palabra auto-tempo test ceiling; Palabra's published default is 1.45.
 desired_queue_level_ms = 5000 # Desired translated-speech queue size inside Palabra.
 max_queue_level_ms = 20000 # Maximum queue size before Palabra drops older queued audio.
 segment_confirmation_silence_threshold = 0.7 # Keep in Palabra's 0.5-0.9s range; lower values can split sentences too early.
@@ -37,8 +37,18 @@ segment_confirmation_silence_threshold = 0.7
 desired_queue_level_ms = 5000
 max_queue_level_ms = 20000
 auto_tempo = true
-min_tempo = 1.0
+min_tempo = 1.15
 max_tempo = 1.45
+
+[palabra.presets.palabra_auto_tempo_test]
+segment_confirmation_silence_threshold = 0.7
+desired_queue_level_ms = 5000
+max_queue_level_ms = 20000
+auto_tempo = true
+min_tempo = 1.1
+max_tempo = 1.3
+segment_alignment_strategy = "pad_only"
+time_stretch_engine = "ffmpeg_atempo"
 
 [palabra.presets.local_rubberband]
 segment_confirmation_silence_threshold = 0.7

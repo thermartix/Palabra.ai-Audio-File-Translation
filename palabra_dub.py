@@ -29,7 +29,7 @@ AUDIO_OUTPUT_EXTENSIONS = {".mp3", ".wav"}
 VIDEO_OUTPUT_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
 ANIMATION_WIDTH = 80
 _ANIMATION_ACTIVE = False
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 
 @dataclasses.dataclass
@@ -276,9 +276,10 @@ def apply_timing_mode(config: dict, timing_mode: str) -> dict:
         merged.update(
             {
                 "auto_tempo": True,
-                "min_tempo": 1.0,
-                "max_tempo": 1.45,
+                "min_tempo": 1.1,
+                "max_tempo": 1.3,
                 "segment_alignment_strategy": "pad_only",
+                "time_stretch_engine": "ffmpeg_atempo",
             }
         )
     elif mode == "local-rubberband":

@@ -70,14 +70,14 @@ Dubbing-oriented timing fields:
 
 - `timing_mode = "palabra"`
 - `auto_tempo = true`
-- `min_tempo = 1.0`
-- `max_tempo = 1.45`
+- `min_tempo = 1.1`
+- `max_tempo = 1.3`
 - `desired_queue_level_ms = 5000`
 - `max_queue_level_ms = 20000`
 - `pad_output_to_input_duration = true`
 - `alignment_mode = "ffmpeg_segments"`
 
-These are Palabra's recommended no-drop defaults. Palabra support reproduced missing audio when the silence threshold was too low and the queue was too tight. In that failure mode, some segments started returning audio but never sent a final `last_chunk=true`, which left silent gaps in the output.
+These keep Palabra in control of speech speed while preserving the no-drop queue and segmentation safeguards. Palabra support reproduced missing audio when the silence threshold was too low and the queue was too tight. In that failure mode, some segments started returning audio but never sent a final `last_chunk=true`, which left silent gaps in the output.
 
 Keep these values unless you are intentionally testing timing behavior:
 
@@ -85,14 +85,16 @@ Keep these values unless you are intentionally testing timing behavior:
 - `desired_queue_level_ms = 5000`
 - `max_queue_level_ms = 20000`
 - `auto_tempo = true`
-- `min_tempo = 1.0`
-- `max_tempo = 1.45`
+- `min_tempo = 1.1`
+- `max_tempo = 1.3`
 
 Avoid `segment_confirmation_silence_threshold` below `0.5`; Palabra's recommended range is `0.5` to `0.9`. Avoid tight queues such as `max_queue_level_ms = 8000` with low speed ceilings, because Palabra can drop older queued audio once the queue reaches the maximum.
 
+Palabra's published default queue config currently lists `min_tempo = 1.15` and `max_tempo = 1.45`. This project is currently testing a narrower Palabra auto-tempo range, `1.1` to `1.3`, to reduce speed changes while still letting Palabra drain its queue.
+
 Timing mode options:
 
-- `timing_mode = "palabra"`: use Palabra's recommended queue and auto-tempo settings; this is the default.
+- `timing_mode = "palabra"`: use Palabra's queue safeguards and the current `1.1` to `1.3` auto-tempo test range; this is the default.
 - `timing_mode = "local-rubberband"`: keep Palabra at normal speed, then locally fit long segments with FFmpeg's Rubber Band filter.
 - `timing_mode = "local-atempo"`: keep Palabra at normal speed, then locally fit long segments with FFmpeg's simpler `atempo` filter.
 - `timing_mode = "config"`: use the raw TOML values exactly as written.
@@ -104,7 +106,7 @@ python palabra_dub.py input_file.mp4 --video --timing-mode palabra
 python palabra_dub.py input_file.mp4 --video --timing-mode local-rubberband
 ```
 
-For local timing tests, `time_stretch_engine = "rubberband"` chooses the Rubber Band filter. Use `time_stretch_engine = "ffmpeg_atempo"` if you want FFmpeg's simpler tempo filter instead.
+For local timing tests, `time_stretch_engine = "rubberband"` chooses the Rubber Band filter. The default Palabra timing mode does not use Rubber Band.
 
 Phrase-alignment fields:
 
@@ -114,7 +116,7 @@ Phrase-alignment fields:
 - `normalize_source_timestamps = true`
 - `segment_alignment_strategy = "pad_only"` for Palabra timing, or `"pad_or_speedup"` for local timing tests
 - `segment_max_speedup = 1.45`
-- `time_stretch_engine = "rubberband"`
+- `time_stretch_engine = "ffmpeg_atempo"` for Palabra timing; `"rubberband"` only for local timing tests
 - `subtitle_max_speedup = 1.35`
 - `subtitle_tts_max_chars = 256`
 - `subtitle_tts_text_chunk_delay_ms = 50`

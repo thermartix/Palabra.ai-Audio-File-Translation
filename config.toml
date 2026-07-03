@@ -1,17 +1,17 @@
 source_language = "es" # Language spoken in the source video.
-target_language = "cs" # Language to synthesize in the translated output.
+target_language = "sk" # Language to synthesize in the translated output.
 speech_mode = "voice_id" # "voice_id" for a fixed voice, or "voice_cloning" to use Palabra default/generic timbre voices.
-voice_id = "5d65c31a-7443-4b03-9e9c-9f333bea8c52" # Target voice to use when speech_mode = "voice_id".
+voice_id = "9fe7383b-a8cd-4737-bc77-d6b47f2c17cd" # Target voice to use when speech_mode = "voice_id".
 ffmpeg_path = "ffmpeg" # ffmpeg executable name or full path.
 mp4_audio_bitrate = "Auto" # MP4 AAC audio bitrate: "Auto" lets ffmpeg decide; fixed mono options are "64k", "80k", "96k", "128k", or "160k".
 alignment_mode = "ffmpeg_segments" # "raw", "inline", or "ffmpeg_segments".
 timing_mode = "palabra" # "palabra" uses Palabra's no-drop auto-tempo defaults; override with --timing-mode for one run.
-time_stretch_engine = "rubberband" # Local speedup engine for local-rubberband mode; use "ffmpeg_atempo" for FFmpeg's simpler tempo filter.
+time_stretch_engine = "ffmpeg_atempo" # Not used in "palabra" mode; set to "rubberband" only for local-rubberband tests.
 audio_chunk_ms = 320 # Source audio chunk size sent to Palabra over WebSocket.
 output_inactivity_timeout_sec = 10.0 # Stop waiting after this many seconds without returned audio.
 auto_tempo = true # Palabra recommends true so its queue can drain before old audio is dropped.
-min_tempo = 1.0 # Minimum Palabra TTS tempo multiplier.
-max_tempo = 1.45 # Palabra recommended maximum; lower values can let long/fast speech fill the queue.
+min_tempo = 1.1 # Current Palabra auto-tempo test floor; Palabra's published default is 1.15.
+max_tempo = 1.3 # Current Palabra auto-tempo test ceiling; Palabra's published default is 1.45.
 desired_queue_level_ms = 5000 # Desired translated-speech queue size inside Palabra.
 max_queue_level_ms = 20000 # Maximum queue size before Palabra drops older queued audio.
 segment_confirmation_silence_threshold = 0.7 # Keep in Palabra's 0.5-0.9s range; lower values can split sentences too early.
@@ -25,12 +25,8 @@ pad_output_to_input_duration = true # Pad the finished WAV with silence if it en
 trim_output_to_input_duration = false # Trim the finished WAV if it runs longer than the source audio.
 write_alignment_debug_json = true # Write .segments.json plus Palabra input sidecars for timing/debug analysis.
 
-# Use this when complete synthesized audio matters more than lowest latency.
-# Changing these settings can cause Palabra to split, replace, or partially
-# synthesize speech segments unpredictably, which may cause missing words or cut-off audio.
-
 [palabra.presets.complete_audio]
-segment_confirmation_silence_threshold = 0.8
+segment_confirmation_silence_threshold = 0.7
 only_confirm_by_silence = true
 sentence_splitter_enabled = false
 translate_partial_transcriptions = false
@@ -40,8 +36,18 @@ segment_confirmation_silence_threshold = 0.7
 desired_queue_level_ms = 5000
 max_queue_level_ms = 20000
 auto_tempo = true
-min_tempo = 1.0
+min_tempo = 1.15
 max_tempo = 1.45
+
+[palabra.presets.palabra_auto_tempo_test]
+segment_confirmation_silence_threshold = 0.7
+desired_queue_level_ms = 5000
+max_queue_level_ms = 20000
+auto_tempo = true
+min_tempo = 1.1
+max_tempo = 1.3
+segment_alignment_strategy = "pad_only"
+time_stretch_engine = "ffmpeg_atempo"
 
 [palabra.presets.local_rubberband]
 segment_confirmation_silence_threshold = 0.7
@@ -59,3 +65,4 @@ time_stretch_engine = "rubberband"
 # EN Mike Potillo c9f3cce4-f7f4-4940-b7cb-46ef87341a6e
 # HU Sándor Dobi 0130fa45-d18a-4dfe-be53-5a48ccf07556
 # CZ Male 5d65c31a-7443-4b03-9e9c-9f333bea8c52
+# ES Hugo Palafox 9fe7383b-a8cd-4737-bc77-d6b47f2c17cd

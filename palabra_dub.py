@@ -29,7 +29,7 @@ AUDIO_OUTPUT_EXTENSIONS = {".mp3", ".wav"}
 VIDEO_OUTPUT_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
 ANIMATION_WIDTH = 80
 _ANIMATION_ACTIVE = False
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 
 
 @dataclasses.dataclass
@@ -1749,6 +1749,12 @@ def parse_args() -> argparse.Namespace:
         help="Save translated audio as mp3 or wav. Defaults to mp3 when no output switch is provided.",
     )
     parser.add_argument("--video", action="store_true", help="Save a video with the translated audio muxed in.")
+    parser.add_argument(
+        "--tl",
+        "--target-language",
+        dest="target_language",
+        help="Override the configured target language for this run (for example, de).",
+    )
     parser.add_argument("--subtitles", help="Create the voiceover from a timed .sbv subtitle file instead of source audio transcription.")
     parser.add_argument("--voice-id", help="Override the configured Palabra voice_id.")
     parser.add_argument(
@@ -1771,6 +1777,7 @@ def main() -> int:
     config_path = Path("config.toml").resolve()
     load_dotenv(config_path.with_name(".env"))
     config = apply_env_overrides(load_config(config_path))
+    config["target_language"] = str(args.target_language or config.get("target_language", "")).strip().lower()
     config = apply_timing_mode(config, args.timing_mode or str(config.get("timing_mode", "config")))
     input_video = Path(args.input_video).resolve()
     target_language = str(config.get("target_language", ""))

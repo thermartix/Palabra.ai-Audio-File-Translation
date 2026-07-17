@@ -174,6 +174,14 @@ python palabra_dub.py input_file.mp4 --video
 python palabra_dub.py input_file.mp4 custom_output.mp4
 ```
 
+Override the configured target language for one run with `--tl` (or `--target-language`):
+
+```bash
+python palabra_dub.py input_file.mp4 --video --tl de
+```
+
+Target language codes are normalized to lowercase, whether they come from `config.toml` or the CLI. For example, `FR` is sent to Palabra as `fr`.
+
 Audio and video output together:
 
 ```bash
@@ -203,7 +211,7 @@ python palabra_dub.py input_file.mp4 --audio --voice-id YOUR_OTHER_VOICE_ID
 python palabra_dub.py input_file.mp4 --video --timing-mode local-rubberband
 ```
 
-Without an explicit output path, outputs are saved next to the input as `input_file_dubbed_DE.mp3`, `input_file_dubbed_DE.wav`, and/or `input_file_dubbed_DE.mp4`, using the configured `target_language` code. With an explicit `output.xxx`, the extension selects audio or video output and the provided path is used as-is.
+Without an explicit output path, outputs are saved next to the input as `input_file_dubbed_de.mp3`, `input_file_dubbed_de.wav`, and/or `input_file_dubbed_de.mp4`, using the normalized `target_language` code. With an explicit `output.xxx`, the extension selects audio or video output and the provided path is used as-is.
 
 Concurrent runs can use the same input video as long as each run uses a different output path. Per-run scratch files are written into a unique temporary work directory next to the working WAV, then cleaned up at the end.
 

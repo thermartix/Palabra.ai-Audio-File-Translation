@@ -1,7 +1,7 @@
 client_id = "" # Leave empty here; loaded from PALABRA_CLIENT_ID in .env.
 client_secret = "" # Leave empty here; loaded from PALABRA_CLIENT_SECRET in .env.
 source_language = "en" # Language spoken in the source video.
-target_language = "de" # Language to synthesize in the translated output.
+target_language = "de" # Language to synthesize; the CLI normalizes this value to lowercase.
 speech_mode = "voice_id" # "voice_id" for a fixed voice, or "voice_cloning" to mimic the speaker.
 voice_id = "YOUR_VOICE_ID" # Target voice to use when speech_mode = "voice_id".
 subtitle_tts_voice_id = "" # Optional voice override for --subtitles; leave empty to reuse voice_id.

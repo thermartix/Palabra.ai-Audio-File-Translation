@@ -9,3 +9,4 @@ __pycache__/
 *.wav
 *.segments.json
 *.palabra-input.json
+/debug_files/

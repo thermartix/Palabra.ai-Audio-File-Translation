@@ -1,7 +1,7 @@
-source_language = "es" # Language spoken in the source video.
-target_language = "sk" # Language to synthesize in the translated output.
+source_language = "en" # Language spoken in the source video.
+target_language = "hu" # Language to synthesize in the translated output.
 speech_mode = "voice_id" # "voice_id" for a fixed voice, or "voice_cloning" to use Palabra default/generic timbre voices.
-voice_id = "9fe7383b-a8cd-4737-bc77-d6b47f2c17cd" # Target voice to use when speech_mode = "voice_id".
+voice_id = "c9f3cce4-f7f4-4940-b7cb-46ef87341a6e" # Target voice to use when speech_mode = "voice_id".
 subtitle_tts_voice_id = "" # Optional voice override for --subtitles; leave empty to reuse voice_id.
 ffmpeg_path = "ffmpeg" # ffmpeg executable name or full path.
 mp4_audio_bitrate = "Auto" # MP4 AAC audio bitrate: "Auto" lets ffmpeg decide; fixed mono options are "64k", "80k", "96k", "128k", or "160k".
@@ -11,10 +11,10 @@ time_stretch_engine = "ffmpeg_atempo" # Not used in "palabra" mode; set to "rubb
 audio_chunk_ms = 320 # Source audio chunk size sent to Palabra over WebSocket.
 output_inactivity_timeout_sec = 10.0 # Stop waiting after this many seconds without returned audio.
 auto_tempo = true # Palabra recommends true so its queue can drain before old audio is dropped.
-min_tempo = 1.1 # Current Palabra auto-tempo test floor; Palabra's published default is 1.15.
-max_tempo = 1.3 # Current Palabra auto-tempo test ceiling; Palabra's published default is 1.45.
+min_tempo = 1.0 # Current Palabra auto-tempo test floor; Palabra's published default is 1.15.
+max_tempo = 1.45 # Current Palabra auto-tempo test ceiling; Palabra's published default is 1.45.
 desired_queue_level_ms = 5000 # Desired translated-speech queue size inside Palabra.
-max_queue_level_ms = 20000 # Maximum queue size before Palabra drops older queued audio.
+max_queue_level_ms = 30000 # Maximum queue size before Palabra drops older queued audio.
 segment_confirmation_silence_threshold = 0.7 # Keep in Palabra's 0.5-0.9s range; lower values can split sentences too early.
 sentence_splitter_enabled = true # Allow Palabra to split long sentences into smaller chunks.
 pad_segments_to_source_timing = true # Add silence after short translated sections to keep timing closer.
@@ -63,7 +63,7 @@ time_stretch_engine = "rubberband"
 
 
 # voice database:
-# EN Mike Potillo c9f3cce4-f7f4-4940-b7cb-46ef87341a6e
-# HU Sándor Dobi 0130fa45-d18a-4dfe-be53-5a48ccf07556
+# EN Mike c9f3cce4-f7f4-4940-b7cb-46ef87341a6e
+# HU Sándor 0130fa45-d18a-4dfe-be53-5a48ccf07556
 # CZ Male 5d65c31a-7443-4b03-9e9c-9f333bea8c52
-# ES Hugo Palafox 9fe7383b-a8cd-4737-bc77-d6b47f2c17cd
+# ES Hugo 9fe7383b-a8cd-4737-bc77-d6b47f2c17cd

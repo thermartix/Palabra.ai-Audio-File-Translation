@@ -29,7 +29,9 @@ AUDIO_OUTPUT_EXTENSIONS = {".mp3", ".wav"}
 VIDEO_OUTPUT_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
 ANIMATION_WIDTH = 80
 _ANIMATION_ACTIVE = False
-__version__ = "0.3.3"
+__version__ = "0.3.4"
+
+DEFAULT_TTS_WS_URL = "wss://stream.palabra.ai/tts-api/v1/text-to-speech/stream"
 
 
 @dataclasses.dataclass
@@ -674,6 +676,17 @@ def build_set_task(config: dict) -> dict:
             "transcription_correction_style": None,
         },
     }
+
+
+def build_tts_endpoint(session: dict, config: dict) -> str:
+    publisher = session.get("publisher")
+    if not publisher:
+        raise RuntimeError("Palabra session response did not include a publisher access token")
+
+    # Realtime TTS now has a dedicated endpoint instead of a session-specific ws_tts_url.
+    ws_tts_url = str(config.get("subtitle_tts_ws_url") or DEFAULT_TTS_WS_URL).strip()
+    delimiter = "&" if "?" in ws_tts_url else "?"
+    return f"{ws_tts_url}{delimiter}token={urllib.parse.quote(str(publisher))}"
     if "only_confirm_by_silence" in config:
         transcription["only_confirm_by_silence"] = bool(config["only_confirm_by_silence"])
 
@@ -1475,12 +1488,7 @@ async def run_subtitle_pipeline(config: dict) -> None:
 
         log("Creating Palabra TTS session...")
         session = create_session(config["client_id"], config["client_secret"])
-        ws_tts_url = session.get("ws_tts_url")
-        if not ws_tts_url:
-            raise RuntimeError("Palabra session response did not include ws_tts_url for realtime TTS")
-        publisher = session["publisher"]
-        delimiter = "&" if "?" in ws_tts_url else "?"
-        endpoint = f"{ws_tts_url}{delimiter}token={urllib.parse.quote(publisher)}"
+        endpoint = build_tts_endpoint(session, config)
 
         cue_audio: dict[int, bytes] = {}
         tts_init_debug: dict | None = None

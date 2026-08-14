@@ -200,13 +200,13 @@ With `--subtitles`, the `.sbv` text is treated as the final spoken text. The scr
 
 For `--subtitles`, make sure the configured TTS voice is valid for the TTS language. The TTS language defaults to `target_language` unless `subtitle_tts_language` is set.
 
-`subtitle_tts_max_chars = 256` keeps text chunks conservatively below Palabra's current limit. Long subtitle cues are streamed with one shared generation id, so they remain one phrase instead of separate audio snippets.
+`subtitle_tts_max_chars = 2048` matches the Streaming API `tts_task` text limit. Longer subtitle cues are split into sequential requests and their returned audio is joined.
 
-Palabra currently documents a 1024-character maximum per realtime TTS text message and a 50 text messages/sec rate limit. `subtitle_tts_text_chunk_delay_ms = 50` adds gentle pacing between chunks of a long cue; increase it if long cues still lose text. `subtitle_tts_phrase_delay_ms` can add a pause between completed cue requests for debugging.
+`subtitle_tts_task_start_delay_sec = 2.5` gives Palabra time to apply the text-only task before the first `tts_task`. `subtitle_tts_text_chunk_delay_ms` and `subtitle_tts_phrase_delay_ms` can add pacing between requests for debugging.
 
-Subtitle TTS uses the dedicated realtime TTS URL returned by Palabra during session creation. With Client ID/Client Secret accounts, the script requests a publisher-enabled session and uses its short-lived publisher access token to authenticate that connection; no separate API key is required.
+Subtitle TTS uses the existing Palabra Streaming API URL returned as `ws_url` during session creation. It authenticates with the short-lived publisher token created from the configured Client ID and Client Secret, sends a text-only `set_task`, and synthesizes each subtitle with `tts_task`. It does not require the separate standalone TTS product or a standalone API key.
 
-For support diagnostics, subtitle TTS runs log the session response field names, returned `ws_url` and `ws_tts_url`, the token-free endpoint being called, the message protocol, and detailed WebSocket errors. Client credentials and publisher tokens are never printed. The current subtitle implementation uses `ws_tts_url` with `init`/`text` messages and does not send a `style` parameter; it does not use the Streaming API `tts_task` command.
+For support diagnostics, subtitle TTS runs log the session response field names, returned `ws_url` and `ws_tts_url`, the token-free endpoint being called, the message protocol, and detailed WebSocket errors. Client credentials and publisher tokens are never printed. The subtitle implementation does not send a `style` parameter.
 
 Optional override:
 

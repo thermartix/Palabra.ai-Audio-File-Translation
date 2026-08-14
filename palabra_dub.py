@@ -29,7 +29,7 @@ AUDIO_OUTPUT_EXTENSIONS = {".mp3", ".wav"}
 VIDEO_OUTPUT_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
 ANIMATION_WIDTH = 80
 _ANIMATION_ACTIVE = False
-__version__ = "0.3.6"
+__version__ = "0.3.7"
 
 
 @dataclasses.dataclass
@@ -732,20 +732,56 @@ def build_set_task(config: dict) -> dict:
     }
 
 
-def build_tts_endpoint(session: dict) -> str:
+def build_streaming_tts_endpoint(session: dict) -> str:
     publisher = session.get("publisher")
     if not publisher:
         raise RuntimeError("Palabra session response did not include a publisher access token")
 
-    # Palabra returns the account- and region-specific TTS endpoint when the session
-    # is created with publisher_can_subscribe enabled.
-    ws_tts_url = str(session.get("ws_tts_url") or "").strip()
-    if not ws_tts_url:
-        raise RuntimeError(
-            "Palabra session response did not include ws_tts_url; realtime TTS may not be enabled for this account"
-        )
-    delimiter = "&" if "?" in ws_tts_url else "?"
-    return f"{ws_tts_url}{delimiter}token={urllib.parse.quote(str(publisher))}"
+    ws_url = str(session.get("ws_url") or "").strip()
+    if not ws_url:
+        raise RuntimeError("Palabra session response did not include ws_url")
+    delimiter = "&" if "?" in ws_url else "?"
+    return f"{ws_url}{delimiter}token={urllib.parse.quote(str(publisher))}"
+
+
+def build_streaming_tts_set_task(config: dict) -> dict:
+    language = subtitle_tts_language(config)
+    voice_id = subtitle_tts_voice_options(config)["voice_id"]
+    return {
+        "message_type": "set_task",
+        "data": {
+            "input_stream": None,
+            "output_stream": {
+                "content_type": "audio",
+                "target": {
+                    "type": "ws",
+                    "format": "pcm_s16le",
+                    "sample_rate": OUTPUT_SAMPLE_RATE,
+                    "channels": OUTPUT_CHANNELS,
+                },
+            },
+            "pipeline": {
+                "transcription": None,
+                "translations": [
+                    {
+                        "target_language": language,
+                        "speech_generation": {
+                            "voice_cloning": False,
+                            "voice_id": voice_id,
+                        },
+                    }
+                ],
+                "allowed_message_types": [],
+            },
+        },
+    }
+
+
+def build_streaming_tts_task(text: str, language: str) -> dict:
+    return {
+        "message_type": "tts_task",
+        "data": {"text": text, "language": language, "translate_text": False},
+    }
 
 
 def log_tts_connection_diagnostics(session: dict) -> None:
@@ -753,7 +789,7 @@ def log_tts_connection_diagnostics(session: dict) -> None:
     log(f"Palabra session response fields: {', '.join(fields) if fields else '(none)'}")
     log(f"Palabra session ws_url: {session.get('ws_url') or '(not returned)'}")
     log(f"Palabra session ws_tts_url: {session.get('ws_tts_url') or '(not returned)'}")
-    log("Subtitle TTS protocol: dedicated ws_tts_url with init/text messages; style parameter is not sent")
+    log("Subtitle TTS protocol: Streaming API ws_url with set_task/tts_task messages; style parameter is not sent")
 
 
 def format_websocket_connection_error(exc: BaseException) -> str:
@@ -934,9 +970,9 @@ async def log_current_task_voice_metadata(ws, timeout_sec: float = 3.0) -> None:
     log(f"Palabra message before audio streaming: {compact_json(payload)}")
 
 
-async def receive_tts_generation(
+async def receive_streaming_tts_generation(
     ws,
-    generation_id: str,
+    cue_label: str,
     inactivity_timeout_sec: float,
     voice_metadata_seen: set[str],
 ) -> bytes:
@@ -949,10 +985,10 @@ async def receive_tts_generation(
             message = await asyncio.wait_for(ws.recv(), timeout=inactivity_timeout_sec)
         except asyncio.TimeoutError as exc:
             if chunks:
-                raise RuntimeError(f"Timed out waiting for final TTS chunk for {generation_id}") from exc
-            raise RuntimeError(f"Timed out waiting for TTS audio for {generation_id}") from exc
+                raise RuntimeError(f"Timed out waiting for final TTS chunk for {cue_label}") from exc
+            raise RuntimeError(f"Timed out waiting for TTS audio for {cue_label}") from exc
         except websockets.exceptions.ConnectionClosedOK as exc:
-            raise RuntimeError(f"Palabra WebSocket closed before TTS generation finished: {generation_id}") from exc
+            raise RuntimeError(f"Palabra WebSocket closed before TTS generation finished: {cue_label}") from exc
 
         payload = json.loads(message)
         message_type = payload.get("type") or payload.get("message_type")
@@ -961,23 +997,20 @@ async def receive_tts_generation(
 
         if message_type == "error":
             raise RuntimeError(f"Palabra API error: {json.dumps(data)}")
-        if message_type != "audio_chunk":
+        if message_type != "output_audio_data":
             fingerprint = compact_json(payload, 500)
             if fingerprint not in non_audio_seen and len(non_audio_seen) < 20:
                 non_audio_seen.add(fingerprint)
-                log(f"Palabra TTS non-audio message for {generation_id}: {compact_json(payload)}")
+                log(f"Palabra TTS non-audio message for {cue_label}: {compact_json(payload)}")
             continue
 
-        payload_generation_id = data.get("generation_id")
-        if payload_generation_id and payload_generation_id != generation_id:
-            continue
-
-        encoded = data.get("audio") or data.get("data")
+        audio_data = data.get("transcription") if isinstance(data.get("transcription"), dict) else data
+        encoded = audio_data.get("data") or audio_data.get("audio")
         if encoded:
             chunks.append(trim_pcm_to_frame_boundary(base64.b64decode(encoded)))
             last_audio_at = time.monotonic()
 
-        if data.get("last_chunk") is True:
+        if audio_data.get("last_chunk") is True:
             return b"".join(chunks)
 
         if chunks and time.monotonic() - last_audio_at >= inactivity_timeout_sec:
@@ -1517,8 +1550,8 @@ async def run_subtitle_pipeline(config: dict) -> None:
         log("Creating Palabra TTS session...")
         session = create_session(config["client_id"], config["client_secret"])
         log_tts_connection_diagnostics(session)
-        endpoint = build_tts_endpoint(session)
-        log(f"Connecting to Palabra subtitle TTS endpoint: {session['ws_tts_url']}")
+        endpoint = build_streaming_tts_endpoint(session)
+        log(f"Connecting to Palabra Streaming API endpoint: {session['ws_url']}")
 
         cue_audio: dict[int, bytes] = {}
         tts_init_debug: dict | None = None
@@ -1528,22 +1561,21 @@ async def run_subtitle_pipeline(config: dict) -> None:
         heartbeat_task = asyncio.create_task(animate_progress("Palabra subtitle TTS running", heartbeat_stop))
         try:
             async with websockets.connect(endpoint, max_size=None) as ws:
-                log("Connected. Sending TTS init configuration...")
-                tts_init = build_tts_init(config)
-                tts_init_debug = tts_init
+                log("Connected. Sending text-only Streaming API set_task configuration...")
+                set_task = build_streaming_tts_set_task(config)
+                tts_init_debug = set_task
+                language = subtitle_tts_language(config)
+                voice_id = set_task["data"]["pipeline"]["translations"][0]["speech_generation"]["voice_id"]
                 log(
-                    f"Sending Palabra TTS init with voice_options.voice_id={tts_init['voice_options']['voice_id']} "
-                    f"language={tts_init['language']} model={tts_init['model']} "
-                    f"speed={tts_init['voice_options'].get('speed')} "
-                    f"deaccent_strength={tts_init['voice_options'].get('deaccent_strength')}"
+                    f"Sending Palabra Streaming API set_task with voice_id={voice_id} "
+                    f"target_language={language} input_stream=null style=not-sent"
                 )
-                if tts_init["language"] != str(config.get("source_language", "")).strip():
-                    log(
-                        "Note: realtime TTS voices may be language-specific. If this voice_id belongs to another "
-                        "language, Palabra may substitute a generic voice for subtitle TTS."
-                    )
-                await ws.send(json.dumps(tts_init))
-                max_chars = int(config.get("subtitle_tts_max_chars", 256))
+                await ws.send(json.dumps(set_task))
+                start_delay_sec = max(0.0, float(config.get("subtitle_tts_task_start_delay_sec", 2.5)))
+                if start_delay_sec:
+                    log(f"Waiting {start_delay_sec:.1f}s for the Streaming API task to start...")
+                    await asyncio.sleep(start_delay_sec)
+                max_chars = int(config.get("subtitle_tts_max_chars", 2048))
                 chunk_delay_sec = max(0.0, float(config.get("subtitle_tts_text_chunk_delay_ms", 50)) / 1000.0)
                 phrase_delay_sec = max(0.0, float(config.get("subtitle_tts_phrase_delay_ms", 0)) / 1000.0)
                 if chunk_delay_sec > 0:
@@ -1555,8 +1587,8 @@ async def run_subtitle_pipeline(config: dict) -> None:
                     if len(text_chunks) > 1:
                         log(f"Cue {cue.index} is streamed to TTS in {len(text_chunks)} text chunks because it is long.")
                     update_live_status("sent", f"Generating subtitle phrase {position}/{len(cues)}...")
-                    generation_id = f"subtitle-{cue.index:04d}"
-                    messages = build_tts_text_messages(text_chunks, generation_id)
+                    messages = [build_streaming_tts_task(chunk, language) for chunk in text_chunks]
+                    cue_chunks: list[bytes] = []
                     for message_index, message in enumerate(messages):
                         tts_input_messages.append(
                             {
@@ -1565,14 +1597,17 @@ async def run_subtitle_pipeline(config: dict) -> None:
                             }
                         )
                         await ws.send(json.dumps(message))
+                        cue_chunks.append(
+                            await receive_streaming_tts_generation(
+                                ws,
+                                f"subtitle cue {cue.index}, chunk {message_index + 1}",
+                                float(config.get("output_inactivity_timeout_sec", 8.0)),
+                                tts_voice_metadata_seen,
+                            )
+                        )
                         if chunk_delay_sec > 0 and message_index + 1 < len(messages):
                             await asyncio.sleep(chunk_delay_sec)
-                    cue_audio[cue.index] = await receive_tts_generation(
-                        ws,
-                        generation_id,
-                        float(config.get("output_inactivity_timeout_sec", 8.0)),
-                        tts_voice_metadata_seen,
-                    )
+                    cue_audio[cue.index] = b"".join(cue_chunks)
                     if phrase_delay_sec > 0 and position < len(cues):
                         await asyncio.sleep(phrase_delay_sec)
                 if not tts_voice_metadata_seen:

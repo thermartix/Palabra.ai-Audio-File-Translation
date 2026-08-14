@@ -29,7 +29,7 @@ AUDIO_OUTPUT_EXTENSIONS = {".mp3", ".wav"}
 VIDEO_OUTPUT_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
 ANIMATION_WIDTH = 80
 _ANIMATION_ACTIVE = False
-__version__ = "0.3.7"
+__version__ = "0.3.8"
 
 
 @dataclasses.dataclass
@@ -970,6 +970,33 @@ async def log_current_task_voice_metadata(ws, timeout_sec: float = 3.0) -> None:
     log(f"Palabra message before audio streaming: {compact_json(payload)}")
 
 
+async def wait_for_streaming_tts_task(ws, timeout_sec: float = 15.0) -> None:
+    deadline = time.monotonic() + max(0.1, timeout_sec)
+    attempt = 0
+    while time.monotonic() < deadline:
+        attempt += 1
+        await ws.send(json.dumps({"message_type": "get_task", "data": {"exclude_hidden": True}}))
+        remaining = max(0.1, deadline - time.monotonic())
+        try:
+            message = await asyncio.wait_for(ws.recv(), timeout=min(3.0, remaining))
+        except asyncio.TimeoutError:
+            log(f"Palabra Streaming API task-status poll {attempt} returned no message yet.")
+        else:
+            payload = json.loads(message)
+            message_type = payload.get("message_type") or payload.get("type")
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+            log(f"Palabra Streaming API task-status response: {compact_json(payload, 2000)}")
+            if message_type == "current_task":
+                return
+            if message_type == "error":
+                error_text = compact_json(data, 2000)
+                if "NOT_FOUND" not in error_text.upper():
+                    raise RuntimeError(f"Palabra rejected subtitle TTS set_task: {error_text}")
+        if time.monotonic() < deadline:
+            await asyncio.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
+    raise RuntimeError(f"Palabra subtitle TTS set_task did not become active within {timeout_sec:.1f}s")
+
+
 async def receive_streaming_tts_generation(
     ws,
     cue_label: str,
@@ -1570,11 +1597,12 @@ async def run_subtitle_pipeline(config: dict) -> None:
                     f"Sending Palabra Streaming API set_task with voice_id={voice_id} "
                     f"target_language={language} input_stream=null style=not-sent"
                 )
+                log(f"Palabra Streaming API set_task payload: {compact_json(set_task, 4000)}")
                 await ws.send(json.dumps(set_task))
-                start_delay_sec = max(0.0, float(config.get("subtitle_tts_task_start_delay_sec", 2.5)))
-                if start_delay_sec:
-                    log(f"Waiting {start_delay_sec:.1f}s for the Streaming API task to start...")
-                    await asyncio.sleep(start_delay_sec)
+                await wait_for_streaming_tts_task(
+                    ws, float(config.get("subtitle_tts_task_start_timeout_sec", 15.0))
+                )
+                log("Palabra text-only Streaming API task is active.")
                 max_chars = int(config.get("subtitle_tts_max_chars", 2048))
                 chunk_delay_sec = max(0.0, float(config.get("subtitle_tts_text_chunk_delay_ms", 50)) / 1000.0)
                 phrase_delay_sec = max(0.0, float(config.get("subtitle_tts_phrase_delay_ms", 0)) / 1000.0)
@@ -1596,6 +1624,8 @@ async def run_subtitle_pipeline(config: dict) -> None:
                                 "message": message,
                             }
                         )
+                        if position == 1 and message_index == 0:
+                            log(f"First Palabra Streaming API tts_task payload: {compact_json(message, 4000)}")
                         await ws.send(json.dumps(message))
                         cue_chunks.append(
                             await receive_streaming_tts_generation(

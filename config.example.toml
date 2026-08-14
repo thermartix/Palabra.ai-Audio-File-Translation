@@ -25,7 +25,7 @@ segment_alignment_strategy = "pad_only" # "pad_only" for Palabra timing mode, or
 segment_max_speedup = 1.45 # Max local tempo increase when segment_alignment_strategy = "pad_or_speedup".
 subtitle_max_speedup = 1.35 # Max tempo increase allowed when subtitle TTS would overlap the next cue.
 subtitle_tts_max_chars = 2048 # Streaming API tts_task text limit; lower values split long cues into sequential requests.
-subtitle_tts_task_start_delay_sec = 2.5 # Allow Palabra time to apply the text-only set_task before the first tts_task.
+subtitle_tts_task_start_timeout_sec = 15.0 # Maximum time to poll until Palabra confirms the text-only task is active.
 subtitle_tts_text_chunk_delay_ms = 50 # Optional delay between sequential chunks of one long TTS cue.
 subtitle_tts_phrase_delay_ms = 0 # Optional delay between completed subtitle phrase requests.
 subtitle_silence_trim_padding_sec = 0.0 # Trim leading generated silence so speech starts exactly at the subtitle cue start.

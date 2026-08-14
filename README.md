@@ -57,7 +57,6 @@ Important TOML fields:
 - `speech_mode`
 - `voice_id`
 - `subtitle_tts_voice_id`
-- `subtitle_tts_ws_url`
 - `alignment_mode`
 - `timing_mode`
 
@@ -73,7 +72,6 @@ Subtitle TTS voice selection:
 - `voice_id` is used for normal Speech-to-Speech dubbing as `speech_generation.voice_id`.
 - `subtitle_tts_voice_id` is used only with `--subtitles` as `voice_options.voice_id`.
 - Leave `subtitle_tts_voice_id = ""` to reuse `voice_id` for subtitle TTS.
-- `subtitle_tts_ws_url` defaults to Palabra's European realtime TTS endpoint. Set it to `wss://stream.us.palabra.ai/tts-api/v1/text-to-speech/stream` for the US region.
 
 During a run, the script logs the voice id it sends. For normal dubbing it also asks Palabra for `current_task` after `set_task` and logs any voice metadata Palabra returns. For subtitle TTS it logs any voice metadata or non-audio init/status messages Palabra returns on the TTS WebSocket.
 
@@ -206,7 +204,7 @@ For `--subtitles`, make sure the configured TTS voice is valid for the TTS langu
 
 Palabra currently documents a 1024-character maximum per realtime TTS text message and a 50 text messages/sec rate limit. `subtitle_tts_text_chunk_delay_ms = 50` adds gentle pacing between chunks of a long cue; increase it if long cues still lose text. `subtitle_tts_phrase_delay_ms` can add a pause between completed cue requests for debugging.
 
-Subtitle TTS uses the current dedicated Palabra realtime TTS WebSocket. With Client ID/Client Secret accounts, the script creates a normal Palabra session and uses its short-lived publisher access token to authenticate that connection; no separate API key is required.
+Subtitle TTS uses the dedicated realtime TTS URL returned by Palabra during session creation. With Client ID/Client Secret accounts, the script requests a publisher-enabled session and uses its short-lived publisher access token to authenticate that connection; no separate API key is required.
 
 Optional override:
 

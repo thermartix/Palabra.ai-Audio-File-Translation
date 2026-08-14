@@ -29,7 +29,7 @@ AUDIO_OUTPUT_EXTENSIONS = {".mp3", ".wav"}
 VIDEO_OUTPUT_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
 ANIMATION_WIDTH = 80
 _ANIMATION_ACTIVE = False
-__version__ = "0.3.5"
+__version__ = "0.3.6"
 
 
 @dataclasses.dataclass
@@ -746,6 +746,29 @@ def build_tts_endpoint(session: dict) -> str:
         )
     delimiter = "&" if "?" in ws_tts_url else "?"
     return f"{ws_tts_url}{delimiter}token={urllib.parse.quote(str(publisher))}"
+
+
+def log_tts_connection_diagnostics(session: dict) -> None:
+    fields = sorted(str(key) for key in session)
+    log(f"Palabra session response fields: {', '.join(fields) if fields else '(none)'}")
+    log(f"Palabra session ws_url: {session.get('ws_url') or '(not returned)'}")
+    log(f"Palabra session ws_tts_url: {session.get('ws_tts_url') or '(not returned)'}")
+    log("Subtitle TTS protocol: dedicated ws_tts_url with init/text messages; style parameter is not sent")
+
+
+def format_websocket_connection_error(exc: BaseException) -> str:
+    details = [f"{type(exc).__name__}: {exc}"]
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code is not None:
+        details.append(f"HTTP status={status_code}")
+    code = getattr(exc, "code", None)
+    reason = getattr(exc, "reason", None)
+    if code is not None:
+        details.append(f"close code={code}")
+    if reason:
+        details.append(f"close reason={reason}")
+    return "; ".join(details)
 
 
 def pcm_chunk_size_bytes(chunk_ms: int) -> int:
@@ -1493,7 +1516,9 @@ async def run_subtitle_pipeline(config: dict) -> None:
 
         log("Creating Palabra TTS session...")
         session = create_session(config["client_id"], config["client_secret"])
+        log_tts_connection_diagnostics(session)
         endpoint = build_tts_endpoint(session)
+        log(f"Connecting to Palabra subtitle TTS endpoint: {session['ws_tts_url']}")
 
         cue_audio: dict[int, bytes] = {}
         tts_init_debug: dict | None = None
@@ -1552,6 +1577,9 @@ async def run_subtitle_pipeline(config: dict) -> None:
                         await asyncio.sleep(phrase_delay_sec)
                 if not tts_voice_metadata_seen:
                     log("Palabra TTS response did not include returned voice_id or other voice metadata.")
+        except Exception as exc:
+            log(f"Palabra subtitle TTS connection/generation error: {format_websocket_connection_error(exc)}")
+            raise
         finally:
             heartbeat_stop.set()
             await heartbeat_task

@@ -206,6 +206,8 @@ Palabra currently documents a 1024-character maximum per realtime TTS text messa
 
 Subtitle TTS uses the dedicated realtime TTS URL returned by Palabra during session creation. With Client ID/Client Secret accounts, the script requests a publisher-enabled session and uses its short-lived publisher access token to authenticate that connection; no separate API key is required.
 
+For support diagnostics, subtitle TTS runs log the session response field names, returned `ws_url` and `ws_tts_url`, the token-free endpoint being called, the message protocol, and detailed WebSocket errors. Client credentials and publisher tokens are never printed. The current subtitle implementation uses `ws_tts_url` with `init`/`text` messages and does not send a `style` parameter; it does not use the Streaming API `tts_task` command.
+
 Optional override:
 
 ```bash

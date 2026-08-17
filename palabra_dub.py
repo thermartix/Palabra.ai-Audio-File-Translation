@@ -29,7 +29,7 @@ AUDIO_OUTPUT_EXTENSIONS = {".mp3", ".wav"}
 VIDEO_OUTPUT_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
 ANIMATION_WIDTH = 80
 _ANIMATION_ACTIVE = False
-__version__ = "0.3.9"
+__version__ = "0.3.10"
 
 
 @dataclasses.dataclass
@@ -166,6 +166,70 @@ def compact_json(value: object, max_chars: int = 500) -> str:
     if len(text) <= max_chars:
         return text
     return text[: max_chars - 3] + "..."
+
+
+def describe_redacted_value(value: object) -> str:
+    if isinstance(value, (list, tuple)):
+        return f"<redacted {type(value).__name__} count={len(value)}>"
+    if isinstance(value, str):
+        return f"<redacted string length={len(value)}>"
+    return f"<redacted {type(value).__name__}>"
+
+
+def sanitize_palabra_diagnostic(value: object, key: str = "") -> object:
+    normalized_key = key.lower()
+    if any(marker in normalized_key for marker in ("token", "secret", "authorization", "credential")):
+        return describe_redacted_value(value)
+    if normalized_key in {"publisher", "subscriber", "api_key", "client_id"}:
+        return describe_redacted_value(value)
+    if normalized_key.endswith("url") and isinstance(value, str):
+        parsed = urllib.parse.urlsplit(value)
+        return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    if isinstance(value, dict):
+        return {
+            str(child_key): sanitize_palabra_diagnostic(child, str(child_key))
+            for child_key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [sanitize_palabra_diagnostic(child) for child in value]
+    return value
+
+
+def log_tts_session_diagnostics(session: dict) -> None:
+    fields = sorted(str(key) for key in session)
+    log(f"Palabra TTS session returned fields: {', '.join(fields) if fields else '(none)'}")
+    log(f"Palabra TTS session data (credentials redacted): {compact_json(sanitize_palabra_diagnostic(session), 4000)}")
+    log(
+        "Palabra TTS endpoint availability: "
+        f"ws_tts_url={'present' if session.get('ws_tts_url') else 'MISSING'}, "
+        f"ws_url={'present' if session.get('ws_url') else 'missing'}, "
+        f"publisher={'present' if session.get('publisher') else 'missing'}"
+    )
+
+
+def redact_sensitive_text(text: object, sensitive_values: tuple[object, ...]) -> str:
+    redacted = str(text)
+    for value in sensitive_values:
+        if value:
+            redacted = redacted.replace(str(value), "<redacted>")
+    return redacted
+
+
+def format_websocket_connection_error(
+    exc: BaseException, sensitive_values: tuple[object, ...] = ()
+) -> str:
+    details = [f"{type(exc).__name__}: {redact_sensitive_text(exc, sensitive_values)}"]
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code is not None:
+        details.append(f"HTTP status={status_code}")
+    code = getattr(exc, "code", None)
+    reason = getattr(exc, "reason", None)
+    if code is not None:
+        details.append(f"close code={code}")
+    if reason:
+        details.append(f"close reason={redact_sensitive_text(reason, sensitive_values)}")
+    return "; ".join(details)
 
 
 def collect_voice_metadata(value: object, path: str = "") -> list[tuple[str, object]]:
@@ -900,6 +964,7 @@ async def receive_tts_generation(
     voice_metadata_seen: set[str],
 ) -> bytes:
     chunks: list[bytes] = []
+    audio_chunk_count = 0
     last_audio_at = time.monotonic()
     non_audio_seen: set[str] = set()
 
@@ -919,12 +984,15 @@ async def receive_tts_generation(
         log_voice_metadata("Palabra TTS response", payload, voice_metadata_seen)
 
         if message_type == "error":
-            raise RuntimeError(f"Palabra API error: {json.dumps(data)}")
+            raise RuntimeError(f"Palabra API error: {compact_json(sanitize_palabra_diagnostic(data), 2000)}")
         if message_type != "audio_chunk":
             fingerprint = compact_json(payload, 500)
             if fingerprint not in non_audio_seen and len(non_audio_seen) < 20:
                 non_audio_seen.add(fingerprint)
-                log(f"Palabra TTS non-audio message for {generation_id}: {compact_json(payload)}")
+                log(
+                    f"Palabra TTS non-audio message for {generation_id}: "
+                    f"{compact_json(sanitize_palabra_diagnostic(payload))}"
+                )
             continue
 
         payload_generation_id = data.get("generation_id")
@@ -933,10 +1001,28 @@ async def receive_tts_generation(
 
         encoded = data.get("audio") or data.get("data")
         if encoded:
-            chunks.append(trim_pcm_to_frame_boundary(base64.b64decode(encoded)))
+            decoded = trim_pcm_to_frame_boundary(base64.b64decode(encoded))
+            chunks.append(decoded)
+            audio_chunk_count += 1
             last_audio_at = time.monotonic()
 
+            if audio_chunk_count == 1 or data.get("last_chunk") is True:
+                metadata = dict(data)
+                if "audio" in metadata:
+                    metadata["audio"] = f"<base64 length={len(str(metadata['audio']))}>"
+                if "data" in metadata:
+                    metadata["data"] = f"<base64 length={len(str(metadata['data']))}>"
+                metadata["decoded_audio_bytes"] = len(decoded)
+                log(
+                    f"Palabra TTS audio metadata for {generation_id}, chunk {audio_chunk_count}: "
+                    f"{compact_json(metadata, 2000)}"
+                )
+
         if data.get("last_chunk") is True:
+            log(
+                f"Palabra TTS generation {generation_id} completed: "
+                f"audio_chunks={audio_chunk_count}, pcm_bytes={sum(len(chunk) for chunk in chunks)}"
+            )
             return b"".join(chunks)
 
         if chunks and time.monotonic() - last_audio_at >= inactivity_timeout_sec:
@@ -1475,12 +1561,18 @@ async def run_subtitle_pipeline(config: dict) -> None:
 
         log("Creating Palabra TTS session...")
         session = create_session(config["client_id"], config["client_secret"])
+        log_tts_session_diagnostics(session)
         ws_tts_url = session.get("ws_tts_url")
         if not ws_tts_url:
-            raise RuntimeError("Palabra session response did not include ws_tts_url for realtime TTS")
+            fields = ", ".join(sorted(str(key) for key in session)) or "none"
+            raise RuntimeError(
+                "Palabra session response did not include ws_tts_url for realtime TTS; "
+                f"returned fields: {fields}"
+            )
         publisher = session["publisher"]
         delimiter = "&" if "?" in ws_tts_url else "?"
         endpoint = f"{ws_tts_url}{delimiter}token={urllib.parse.quote(publisher)}"
+        log(f"Connecting to Palabra realtime TTS endpoint: {sanitize_palabra_diagnostic(ws_tts_url, 'ws_tts_url')}")
 
         cue_audio: dict[int, bytes] = {}
         tts_init_debug: dict | None = None
@@ -1499,6 +1591,7 @@ async def run_subtitle_pipeline(config: dict) -> None:
                     f"speed={tts_init['voice_options'].get('speed')} "
                     f"deaccent_strength={tts_init['voice_options'].get('deaccent_strength')}"
                 )
+                log(f"Palabra TTS init payload: {compact_json(tts_init, 2000)}")
                 if tts_init["language"] != str(config.get("source_language", "")).strip():
                     log(
                         "Note: realtime TTS voices may be language-specific. If this voice_id belongs to another "
@@ -1539,6 +1632,12 @@ async def run_subtitle_pipeline(config: dict) -> None:
                         await asyncio.sleep(phrase_delay_sec)
                 if not tts_voice_metadata_seen:
                     log("Palabra TTS response did not include returned voice_id or other voice metadata.")
+        except Exception as exc:
+            log(
+                "Palabra realtime TTS connection/generation error: "
+                f"{format_websocket_connection_error(exc, (publisher, endpoint))}"
+            )
+            raise
         finally:
             heartbeat_stop.set()
             await heartbeat_task

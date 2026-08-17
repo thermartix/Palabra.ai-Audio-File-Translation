@@ -206,6 +206,8 @@ Palabra documents a 256-character maximum per realtime TTS text message and a 50
 
 Version 0.3.9 restores the July 24 subtitle TTS path for compatibility testing: it connects to the session-provided `ws_tts_url`, sends the realtime TTS `init` payload, and streams subtitle text messages to one generation per cue.
 
+Version 0.3.10 adds diagnostics to that restored path. Subtitle runs log all session response field names, a credential-redacted session payload, whether `ws_tts_url`, `ws_url`, and `publisher` were returned, the token-free TTS endpoint, the outgoing `init` payload, non-audio responses, first/final audio-chunk metadata, and WebSocket error details. Publisher credentials and base64 audio are never printed.
+
 Optional override:
 
 ```bash

@@ -29,7 +29,8 @@ AUDIO_OUTPUT_EXTENSIONS = {".mp3", ".wav"}
 VIDEO_OUTPUT_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
 ANIMATION_WIDTH = 80
 _ANIMATION_ACTIVE = False
-__version__ = "0.3.10"
+__version__ = "0.3.11"
+PALABRA_REALTIME_TTS_WS_URL = "wss://stream.palabra.ai/tts-api/v1/text-to-speech/stream"
 
 
 @dataclasses.dataclass
@@ -200,8 +201,8 @@ def log_tts_session_diagnostics(session: dict) -> None:
     log(f"Palabra TTS session returned fields: {', '.join(fields) if fields else '(none)'}")
     log(f"Palabra TTS session data (credentials redacted): {compact_json(sanitize_palabra_diagnostic(session), 4000)}")
     log(
-        "Palabra TTS endpoint availability: "
-        f"ws_tts_url={'present' if session.get('ws_tts_url') else 'MISSING'}, "
+        "Palabra TTS session capabilities: "
+        f"legacy ws_tts_url={'present' if session.get('ws_tts_url') else 'not returned (expected)'}, "
         f"ws_url={'present' if session.get('ws_url') else 'missing'}, "
         f"publisher={'present' if session.get('publisher') else 'missing'}"
     )
@@ -661,6 +662,13 @@ def build_tts_init(config: dict) -> dict:
             "sample_rate": OUTPUT_SAMPLE_RATE,
         },
     }
+
+
+def build_tts_endpoint(session: dict) -> str:
+    publisher = session.get("publisher")
+    if not publisher:
+        raise RuntimeError("Palabra session response did not include a publisher token for realtime TTS")
+    return f"{PALABRA_REALTIME_TTS_WS_URL}?token={urllib.parse.quote(str(publisher))}"
 
 
 def split_tts_text(text: str, max_chars: int) -> list[str]:
@@ -1562,17 +1570,9 @@ async def run_subtitle_pipeline(config: dict) -> None:
         log("Creating Palabra TTS session...")
         session = create_session(config["client_id"], config["client_secret"])
         log_tts_session_diagnostics(session)
-        ws_tts_url = session.get("ws_tts_url")
-        if not ws_tts_url:
-            fields = ", ".join(sorted(str(key) for key in session)) or "none"
-            raise RuntimeError(
-                "Palabra session response did not include ws_tts_url for realtime TTS; "
-                f"returned fields: {fields}"
-            )
+        endpoint = build_tts_endpoint(session)
         publisher = session["publisher"]
-        delimiter = "&" if "?" in ws_tts_url else "?"
-        endpoint = f"{ws_tts_url}{delimiter}token={urllib.parse.quote(publisher)}"
-        log(f"Connecting to Palabra realtime TTS endpoint: {sanitize_palabra_diagnostic(ws_tts_url, 'ws_tts_url')}")
+        log(f"Connecting to fixed Palabra realtime TTS endpoint: {PALABRA_REALTIME_TTS_WS_URL}")
 
         cue_audio: dict[int, bytes] = {}
         tts_init_debug: dict | None = None

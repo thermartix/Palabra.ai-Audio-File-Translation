@@ -208,6 +208,8 @@ Version 0.3.9 restores the July 24 subtitle TTS path for compatibility testing: 
 
 Version 0.3.10 adds diagnostics to that restored path. Subtitle runs log all session response field names, a credential-redacted session payload, whether `ws_tts_url`, `ws_url`, and `publisher` were returned, the token-free TTS endpoint, the outgoing `init` payload, non-audio responses, first/final audio-chunk metadata, and WebSocket error details. Publisher credentials and base64 audio are never printed.
 
+Version 0.3.11 uses Palabra's fixed realtime TTS endpoint, `wss://stream.palabra.ai/tts-api/v1/text-to-speech/stream`, authenticated with the publisher token returned by normal session creation. Palabra no longer returns the legacy `ws_tts_url` session field. The realtime TTS `init` and streamed text-message protocol remains unchanged.
+
 Optional override:
 
 ```bash

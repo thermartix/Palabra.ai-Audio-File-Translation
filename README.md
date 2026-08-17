@@ -200,13 +200,11 @@ With `--subtitles`, the `.sbv` text is treated as the final spoken text. The scr
 
 For `--subtitles`, make sure the configured TTS voice is valid for the TTS language. The TTS language defaults to `target_language` unless `subtitle_tts_language` is set.
 
-`subtitle_tts_max_chars = 2048` matches the Streaming API `tts_task` text limit. Longer subtitle cues are split into sequential requests and their returned audio is joined.
+`subtitle_tts_max_chars = 256` keeps text chunks within Palabra realtime TTS limits. Long subtitle cues are streamed with one shared generation id, so they remain one phrase instead of separate audio snippets.
 
-`subtitle_tts_task_start_timeout_sec = 15.0` controls how long the script polls `get_task` for confirmation that the text-only task is active before sending the first `tts_task`. `subtitle_tts_text_chunk_delay_ms` and `subtitle_tts_phrase_delay_ms` can add pacing between requests for debugging.
+Palabra documents a 256-character maximum per realtime TTS text message and a 50 text messages/sec rate limit. `subtitle_tts_text_chunk_delay_ms = 50` adds gentle pacing between chunks of a long cue; increase it if long cues still lose text. `subtitle_tts_phrase_delay_ms` can add a pause between completed cue requests for debugging.
 
-Subtitle TTS uses the existing Palabra Streaming API URL returned as `ws_url` during session creation. It authenticates with the short-lived publisher token created from the configured Client ID and Client Secret, sends a text-only `set_task`, and synthesizes each subtitle with `tts_task`. It does not require the separate standalone TTS product or a standalone API key.
-
-For support diagnostics, subtitle TTS runs log the session response field names, returned `ws_url` and `ws_tts_url`, the token-free endpoint, outgoing `set_task` and first `tts_task` payloads, task-status responses, and detailed WebSocket errors. Client credentials and publisher tokens are never printed. The subtitle implementation does not send a `style` parameter.
+Version 0.3.9 restores the July 24 subtitle TTS path for compatibility testing: it connects to the session-provided `ws_tts_url`, sends the realtime TTS `init` payload, and streams subtitle text messages to one generation per cue.
 
 Optional override:
 
